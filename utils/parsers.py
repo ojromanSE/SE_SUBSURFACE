@@ -1,5 +1,6 @@
 """
 Parsers for well log files: LAS, CSV/Excel, and PDF extraction.
+Supports both text-based and raster (scanned image) PDFs.
 """
 
 import io
@@ -7,6 +8,7 @@ import re
 import lasio
 import pandas as pd
 import pdfplumber
+from PIL import Image
 
 
 def parse_las(file_bytes: bytes, filename: str) -> pd.DataFrame:
@@ -74,11 +76,9 @@ def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
             header, all_rows = _extract_from_text(pdf)
 
     if not all_rows:
-        raise ValueError(
-            f"Could not extract tabular log data from '{filename}'. "
-            "The PDF may contain raster images instead of text-based data. "
-            "Consider converting to LAS or CSV format."
-        )
+        # No tabular data found – this is likely a raster/scanned PDF.
+        # Return empty DataFrame; caller should use extract_pdf_images() instead.
+        return pd.DataFrame()
 
     if header:
         # Ensure header and rows have same length
@@ -160,6 +160,32 @@ def _extract_from_text(pdf) -> tuple:
             rows.append(parts)
 
     return header, rows
+
+
+def extract_pdf_images(file_bytes: bytes) -> list:
+    """
+    Extract raster images from a PDF file.
+    Returns a list of PIL Image objects, one per page that has images.
+    Falls back to rendering full pages if individual image extraction fails.
+    """
+    images = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            # Try to extract embedded images
+            page_images = page.images
+            if page_images:
+                # pdfplumber provides image metadata but not the raw pixels
+                # directly. Convert the full page to an image instead.
+                pil_img = page.to_image(resolution=200).original
+                images.append(pil_img)
+            else:
+                # Page may itself be a full-page raster scan
+                try:
+                    pil_img = page.to_image(resolution=200).original
+                    images.append(pil_img)
+                except Exception:
+                    continue
+    return images
 
 
 def detect_log_curves(df: pd.DataFrame) -> dict:

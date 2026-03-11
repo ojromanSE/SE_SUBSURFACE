@@ -452,6 +452,254 @@ def generate_interpretation_summary(
     return "\n".join(lines)
 
 
+def auto_interpret(df: pd.DataFrame, detected: dict) -> pd.DataFrame:
+    """
+    Fully automatic petrophysical interpretation using sensible defaults.
+    No user input required – designed for non-specialists.
+
+    Applies:
+      - Vshale from GR (Larionov Tertiary) with P5/P95 endpoints
+      - Density porosity (sandstone matrix default 2.65 g/cc)
+      - Neutron-density crossplot porosity if both available
+      - Archie Sw with standard parameters (a=1, m=2, n=2, Rw=0.05)
+      - Net pay with moderate cutoffs (Vsh<0.40, Phi>0.08, Sw<0.60)
+    """
+    result = df.copy()
+
+    # --- Vshale ---
+    if "GR" in detected:
+        gr = result[detected["GR"]].dropna()
+        gr_clean = float(gr.quantile(0.05))
+        gr_shale = float(gr.quantile(0.95))
+        igr = vshale_linear(result[detected["GR"]], gr_clean, gr_shale)
+        result["VSHALE"] = vshale_larionov_tertiary(igr)
+    else:
+        result["VSHALE"] = 0.5
+
+    # --- Porosity ---
+    has_density = "DENSITY" in detected
+    has_neutron = "NEUTRON" in detected
+    has_sonic = "SONIC" in detected
+
+    if has_density and has_neutron:
+        phid = porosity_density(result[detected["DENSITY"]], 2.65, 1.0)
+        phin = result[detected["NEUTRON"]]
+        result["PHIT"] = porosity_neutron_density(phin, phid)
+    elif has_density:
+        result["PHIT"] = porosity_density(result[detected["DENSITY"]], 2.65, 1.0)
+    elif has_sonic:
+        result["PHIT"] = porosity_sonic(result[detected["SONIC"]], 55.5, 189.0)
+    else:
+        result["PHIT"] = 0.10
+
+    result["PHIE"] = effective_porosity(result["PHIT"], result["VSHALE"])
+
+    # --- Water Saturation ---
+    if "RESISTIVITY_DEEP" in detected:
+        rt = result[detected["RESISTIVITY_DEEP"]]
+        result["SW"] = sw_archie(rt, result["PHIE"], rw=0.05, a=1.0, m=2.0, n=2.0)
+    else:
+        result["SW"] = 0.50
+
+    # --- Net Pay (moderate cutoffs) ---
+    result = compute_net_pay(result, "VSHALE", "PHIE", "SW", 0.40, 0.08, 0.60)
+
+    return result
+
+
+def generate_verbal_interpretation(
+    df: pd.DataFrame,
+    net_stats: dict,
+    detected: dict,
+) -> str:
+    """
+    Generate a plain-English, jargon-free interpretation of the well log.
+    Written for someone with no petrophysics background.
+    """
+    sections = []
+
+    # --- What data we have ---
+    curve_names = {
+        "GR": "Gamma Ray (measures rock type – sand vs. shale)",
+        "RESISTIVITY_DEEP": "Resistivity (detects hydrocarbons vs. water)",
+        "DENSITY": "Density (measures rock porosity / pore space)",
+        "NEUTRON": "Neutron (also measures porosity, helps detect gas)",
+        "SONIC": "Sonic / Acoustic (measures how sound travels through rock)",
+        "CALIPER": "Caliper (measures borehole size / hole quality)",
+        "SP": "Spontaneous Potential (helps identify permeable rock)",
+    }
+    avail = [curve_names.get(k, k) for k in detected if k != "DEPTH"]
+    sections.append("WHAT DATA WAS FOUND IN YOUR WELL LOG")
+    sections.append("-" * 45)
+    if avail:
+        for c in avail:
+            sections.append(f"  - {c}")
+    else:
+        sections.append("  No standard log curves were detected.")
+
+    # --- Depth range ---
+    if "DEPTH" in df.columns:
+        top = df["DEPTH"].min()
+        bot = df["DEPTH"].max()
+        sections.append(f"\n  The log covers from {top:.0f} to {bot:.0f} (total interval: {bot - top:.0f}).")
+
+    # --- Rock type ---
+    sections.append("")
+    sections.append("WHAT KIND OF ROCK IS DOWN THERE?")
+    sections.append("-" * 45)
+    if "VSHALE" in df.columns:
+        avg_vsh = df["VSHALE"].mean()
+        pct_clean = (df["VSHALE"] < 0.30).mean() * 100
+        pct_shaly = (df["VSHALE"] >= 0.50).mean() * 100
+
+        if avg_vsh < 0.20:
+            rock_desc = "mostly clean sand or carbonate (very little clay/shale)"
+        elif avg_vsh < 0.35:
+            rock_desc = "predominantly sand with some shale layers"
+        elif avg_vsh < 0.55:
+            rock_desc = "a mix of sand and shale – the reservoir is heterogeneous"
+        else:
+            rock_desc = "predominantly shale with thin sand layers"
+
+        sections.append(f"  The formation is {rock_desc}.")
+        sections.append(f"  About {pct_clean:.0f}% of the interval is clean reservoir rock.")
+        sections.append(f"  About {pct_shaly:.0f}% is shale (non-reservoir rock).")
+    else:
+        sections.append("  Could not determine rock type (no Gamma Ray data).")
+
+    # --- Porosity (storage capacity) ---
+    sections.append("")
+    sections.append("HOW MUCH PORE SPACE IS THERE? (Can it store fluids?)")
+    sections.append("-" * 45)
+    if "PHIE" in df.columns:
+        avg_phi = df["PHIE"].mean()
+        max_phi = df["PHIE"].max()
+
+        if avg_phi >= 0.20:
+            phi_verdict = "Excellent – this rock has lots of pore space to hold oil or gas"
+        elif avg_phi >= 0.15:
+            phi_verdict = "Good – solid reservoir quality"
+        elif avg_phi >= 0.10:
+            phi_verdict = "Moderate – may produce with the right conditions"
+        elif avg_phi >= 0.05:
+            phi_verdict = "Low – this is a tight reservoir, production may be limited"
+        else:
+            phi_verdict = "Very low – unlikely to produce commercially without stimulation"
+
+        sections.append(f"  Average porosity: {avg_phi:.1%}")
+        sections.append(f"  Best porosity seen: {max_phi:.1%}")
+        sections.append(f"  Verdict: {phi_verdict}.")
+    else:
+        sections.append("  Could not determine porosity (missing density/sonic data).")
+
+    # --- What's in the pores? ---
+    sections.append("")
+    sections.append("WHAT IS IN THE PORES? (Oil/gas or water?)")
+    sections.append("-" * 45)
+    if "SW" in df.columns:
+        avg_sw = df["SW"].mean()
+        hydrocarbon_sat = 1.0 - avg_sw
+
+        if avg_sw < 0.30:
+            fluid_verdict = "Strongly hydrocarbon-bearing – mostly oil or gas in the pores"
+        elif avg_sw < 0.50:
+            fluid_verdict = "Good hydrocarbon saturation – more oil/gas than water"
+        elif avg_sw < 0.70:
+            fluid_verdict = "Mixed – there is some hydrocarbon, but also significant water"
+        else:
+            fluid_verdict = "Mostly water – this interval may be below the oil-water contact or water-bearing"
+
+        sections.append(f"  Average water saturation: {avg_sw:.1%}")
+        sections.append(f"  Average hydrocarbon saturation: {hydrocarbon_sat:.1%}")
+        sections.append(f"  Verdict: {fluid_verdict}.")
+
+        # Gas indicator
+        if "DENSITY" in detected and "NEUTRON" in detected:
+            phid = porosity_density(df[detected["DENSITY"]], 2.65, 1.0)
+            phin = df[detected["NEUTRON"]]
+            gas_crossover = (phin < phid).mean() * 100
+            if gas_crossover > 20:
+                sections.append(f"  Gas indicator: {gas_crossover:.0f}% of the interval shows "
+                                "a neutron-density crossover, which typically indicates GAS.")
+            elif gas_crossover > 5:
+                sections.append(f"  Possible gas: {gas_crossover:.0f}% of the interval shows "
+                                "some neutron-density crossover (could indicate gas zones).")
+    else:
+        sections.append("  Could not determine fluid content (no resistivity data).")
+
+    # --- Net Pay ---
+    sections.append("")
+    sections.append("HOW MUCH OF THIS WELL COULD ACTUALLY PRODUCE?")
+    sections.append("-" * 45)
+    gross = net_stats["gross_thickness"]
+    net_pay = net_stats["net_pay"]
+    net_res = net_stats["net_reservoir"]
+    ntg = net_stats["ntg_ratio"]
+
+    sections.append(f"  Total interval logged: {gross:.0f}")
+    sections.append(f"  Rock good enough to be reservoir: {net_res:.0f} ({net_res / gross * 100:.0f}% of total)"
+                    if gross > 0 else f"  Rock good enough to be reservoir: {net_res:.0f}")
+    sections.append(f"  Rock that could actually produce hydrocarbons (net pay): {net_pay:.0f}")
+
+    if gross > 0:
+        sections.append(f"  Net-to-Gross ratio: {ntg:.1%}")
+
+    if ntg >= 0.50:
+        pay_verdict = "A large portion of this well has producible hydrocarbons. This looks promising."
+    elif ntg >= 0.25:
+        pay_verdict = "A moderate portion has producible hydrocarbons. Worth further evaluation."
+    elif ntg > 0:
+        pay_verdict = "Only a small portion has producible hydrocarbons. May be marginal."
+    else:
+        pay_verdict = "No net pay was identified with the current criteria. This interval may not be commercial."
+
+    sections.append(f"  Verdict: {pay_verdict}")
+
+    # --- Bottom line ---
+    sections.append("")
+    sections.append("BOTTOM LINE")
+    sections.append("=" * 45)
+    if "PHIE" in df.columns and "SW" in df.columns:
+        avg_phi = df["PHIE"].mean()
+        avg_sw = df["SW"].mean()
+        sh = 1.0 - avg_sw
+
+        score = 0
+        if avg_phi >= 0.12:
+            score += 1
+        if sh >= 0.40:
+            score += 1
+        if ntg >= 0.30:
+            score += 1
+
+        if score == 3:
+            bottom = ("This well shows GOOD reservoir potential. The rock has adequate "
+                      "porosity, contains hydrocarbons, and has a reasonable net pay. "
+                      "Recommend further evaluation for development.")
+        elif score == 2:
+            bottom = ("This well shows MODERATE potential. Some positive indicators, "
+                      "but at least one factor (porosity, saturation, or net pay) is "
+                      "marginal. More data or testing may be needed.")
+        elif score == 1:
+            bottom = ("This well shows MARGINAL potential. Only one of the key indicators "
+                      "is favorable. Additional wells or production tests are needed to "
+                      "confirm viability.")
+        else:
+            bottom = ("This well does NOT appear commercially promising based on the log "
+                      "data. The combination of porosity, hydrocarbon saturation, and net "
+                      "pay is below typical economic thresholds.")
+        sections.append(f"  {bottom}")
+    else:
+        sections.append("  Insufficient data to provide an overall assessment.")
+
+    sections.append("")
+    sections.append("NOTE: This is an automated screening interpretation using")
+    sections.append("industry-standard methods. A qualified engineer or geologist")
+    sections.append("should review before making investment decisions.")
+
+    return "\n".join(sections)
+
+
 def _assess_reservoir_quality(avg_phi: float, avg_sw: float, ntg: float) -> list:
     """Provide qualitative reservoir quality indicators."""
     items = []
