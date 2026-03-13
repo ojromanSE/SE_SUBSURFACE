@@ -20,6 +20,12 @@ from utils.parsers import (
     extract_pdf_images,
     detect_log_curves,
 )
+from utils.digitizer import (
+    suggest_tracks,
+    detect_log_area,
+    digitize_log_image,
+    annotate_image_with_tracks,
+)
 from utils.petrophysics import (
     auto_interpret,
     compute_net_pay_summary,
@@ -108,35 +114,28 @@ except Exception as e:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Handle raster PDFs (images only)
+# Handle raster PDFs – built-in digitizer
 # ---------------------------------------------------------------------------
 if is_raster_pdf:
     st.success(f"Loaded **{uploaded_file.name}** — scanned/raster PDF with {len(pdf_images)} page(s)")
 
-    tab_images, tab_raw_data = st.tabs(["Log Images", "Upload Digitized Data"])
+    tab_digitizer, tab_images, tab_raw_data = st.tabs([
+        "Digitize Log",
+        "View Pages",
+        "Upload Digitized Data",
+    ])
 
+    # -- Tab: View raw pages --
     with tab_images:
-        st.subheader("Scanned Well Log Images")
-        st.markdown(
-            "This PDF contains **scanned images** rather than digital data. "
-            "The log images are displayed below for visual inspection."
-        )
+        st.subheader("Scanned Well Log Pages")
         for i, img in enumerate(pdf_images):
             st.image(img, caption=f"Page {i + 1}", use_container_width=True)
 
-        st.markdown("---")
-        st.markdown(
-            "**To get a full interpretation**, you can:\n"
-            "1. Digitize these logs using a tool like Neuralog or DigitizeIt\n"
-            "2. Export the data as CSV or LAS\n"
-            "3. Re-upload the digitized file here for automatic interpretation"
-        )
-
+    # -- Tab: Upload pre-digitized file --
     with tab_raw_data:
         st.subheader("Upload Digitized Data")
         st.markdown(
-            "If you have a digitized version of this log (CSV, LAS, or Excel), "
-            "upload it here for interpretation."
+            "If you already have a digitized version (CSV, LAS, or Excel), upload it here."
         )
         digitized_file = st.file_uploader(
             "Upload digitized data",
@@ -151,13 +150,234 @@ if is_raster_pdf:
                     df = parse_las(dig_bytes, dig_name)
                 else:
                     df = parse_csv_excel(dig_bytes, dig_name)
-                is_raster_pdf = False  # Now we have data
+                is_raster_pdf = False
                 st.success(f"Loaded digitized data: {len(df)} rows, {len(df.columns)} columns")
             except Exception as e:
                 st.error(f"Error parsing digitized file: {e}")
 
+    # -- Tab: Built-in Digitizer (PRIMARY) --
+    with tab_digitizer:
+        st.subheader("Log Image Digitizer")
+        st.markdown(
+            "Extract numerical curve data directly from the scanned image. "
+            "The tool will auto-detect the log tracks (columns). You just need to "
+            "tell it the **depth range** and **what each track measures**."
+        )
+
+        if not pdf_images:
+            st.warning("No images could be extracted from this PDF.")
+        else:
+            # --- Step 1: Select page ---
+            if len(pdf_images) > 1:
+                page_idx = st.selectbox(
+                    "Select page to digitize",
+                    range(len(pdf_images)),
+                    format_func=lambda i: f"Page {i + 1}",
+                )
+            else:
+                page_idx = 0
+
+            work_img = pdf_images[page_idx]
+            img_w, img_h = work_img.size
+
+            # --- Step 2: Depth range ---
+            st.markdown("### Step 1: Set the depth range")
+            st.markdown(
+                "Look at the depth scale on the log image. "
+                "Enter the depth at the **top** and **bottom** of the log."
+            )
+            dc1, dc2, dc3 = st.columns(3)
+            with dc1:
+                depth_top = st.number_input("Depth at top of log", value=0.0, step=10.0, format="%.1f")
+            with dc2:
+                depth_bottom = st.number_input("Depth at bottom of log", value=1000.0, step=10.0, format="%.1f")
+            with dc3:
+                sample_interval = st.number_input(
+                    "Sample interval", value=0.5, step=0.1, format="%.1f",
+                    help="How often to sample (in depth units). 0.5 is typical.",
+                )
+
+            if depth_bottom <= depth_top:
+                st.error("Bottom depth must be greater than top depth.")
+                st.stop()
+
+            # --- Step 3: Auto-detect tracks ---
+            st.markdown("### Step 2: Define the log tracks")
+            st.markdown(
+                "The tool detected the column boundaries automatically. "
+                "For each track, select **what curve it contains** and set the **scale range** "
+                "(the min/max values printed at the top of each track on the log)."
+            )
+
+            auto_tracks = suggest_tracks(work_img)
+
+            # Show annotated image with detected boundaries
+            if auto_tracks:
+                annotated = annotate_image_with_tracks(work_img, auto_tracks)
+                st.image(annotated, caption="Detected track boundaries (colored lines)", use_container_width=True)
+            else:
+                st.image(work_img, caption="Original image", use_container_width=True)
+                st.warning("Could not auto-detect tracks. Define them manually below.")
+
+            # --- Step 4: Configure each track ---
+            num_tracks = st.number_input(
+                "Number of tracks to digitize",
+                min_value=1,
+                max_value=10,
+                value=min(len(auto_tracks), 5) if auto_tracks else 3,
+            )
+
+            COMMON_CURVES = {
+                "GR (Gamma Ray)": {"name": "GR", "min": 0.0, "max": 150.0},
+                "ILD / RT (Deep Resistivity)": {"name": "ILD", "min": 0.2, "max": 2000.0},
+                "ILS / RS (Shallow Resistivity)": {"name": "ILS", "min": 0.2, "max": 2000.0},
+                "RHOB (Bulk Density)": {"name": "RHOB", "min": 1.95, "max": 2.95},
+                "NPHI (Neutron Porosity)": {"name": "NPHI", "min": 0.45, "max": -0.15},
+                "DT (Sonic)": {"name": "DT", "min": 140.0, "max": 40.0},
+                "SP (Spontaneous Potential)": {"name": "SP", "min": -160.0, "max": 40.0},
+                "CALI (Caliper)": {"name": "CALI", "min": 6.0, "max": 16.0},
+                "Custom": {"name": "CUSTOM", "min": 0.0, "max": 100.0},
+            }
+            curve_options = list(COMMON_CURVES.keys())
+
+            COLOR_OPTIONS = {
+                "Darkest line (auto)": "dark",
+                "Red curve": "red",
+                "Blue curve": "blue",
+                "Green curve": "green",
+            }
+
+            track_configs = []
+            for i in range(num_tracks):
+                with st.expander(f"Track {i + 1}", expanded=(i < 3)):
+                    tc1, tc2 = st.columns(2)
+                    with tc1:
+                        # Curve type selection
+                        curve_choice = st.selectbox(
+                            "Curve type",
+                            curve_options,
+                            key=f"curve_type_{i}",
+                            index=min(i, len(curve_options) - 1),
+                        )
+                        defaults = COMMON_CURVES[curve_choice]
+
+                        curve_name = defaults["name"]
+                        if curve_choice == "Custom":
+                            curve_name = st.text_input("Curve mnemonic", value="CUSTOM", key=f"custom_name_{i}")
+
+                        color_choice = st.selectbox(
+                            "Trace which color?",
+                            list(COLOR_OPTIONS.keys()),
+                            key=f"color_{i}",
+                            help="Pick the color of the curve you want to trace in this track",
+                        )
+
+                    with tc2:
+                        # Pixel boundaries
+                        auto_left = auto_tracks[i]["left"] if i < len(auto_tracks) else int(img_w * i / num_tracks)
+                        auto_right = auto_tracks[i]["right"] if i < len(auto_tracks) else int(img_w * (i + 1) / num_tracks)
+
+                        left_px = st.number_input(
+                            "Left boundary (pixels)", value=auto_left,
+                            min_value=0, max_value=img_w, key=f"left_{i}",
+                        )
+                        right_px = st.number_input(
+                            "Right boundary (pixels)", value=auto_right,
+                            min_value=0, max_value=img_w, key=f"right_{i}",
+                        )
+
+                        val_min = st.number_input(
+                            "Scale: left edge value", value=defaults["min"],
+                            format="%.2f", key=f"vmin_{i}",
+                            help="Value printed at the LEFT edge of this track",
+                        )
+                        val_max = st.number_input(
+                            "Scale: right edge value", value=defaults["max"],
+                            format="%.2f", key=f"vmax_{i}",
+                            help="Value printed at the RIGHT edge of this track",
+                        )
+
+                    track_configs.append({
+                        "left": int(left_px),
+                        "right": int(right_px),
+                        "curve_name": curve_name,
+                        "min_value": val_min,
+                        "max_value": val_max,
+                        "color_channel": COLOR_OPTIONS[color_choice],
+                    })
+
+            # --- Step 5: Digitize ---
+            st.markdown("### Step 3: Digitize")
+            if st.button("Digitize Log Image", type="primary", use_container_width=True):
+                with st.spinner("Tracing curves from image..."):
+                    digitized_df = digitize_log_image(
+                        work_img,
+                        track_configs,
+                        depth_top,
+                        depth_bottom,
+                        sample_interval,
+                    )
+
+                if digitized_df.empty or len(digitized_df.columns) <= 1:
+                    st.error("Could not extract any curves. Try adjusting the track boundaries.")
+                else:
+                    st.success(
+                        f"Digitized **{len(digitized_df.columns) - 1} curves** "
+                        f"over **{len(digitized_df)} depth points**"
+                    )
+
+                    # Preview the digitized data
+                    st.markdown("**Preview of digitized data:**")
+                    st.dataframe(digitized_df.head(20), use_container_width=True)
+
+                    # Quick plot of digitized curves
+                    st.markdown("**Digitized curves:**")
+                    import matplotlib.pyplot as plt
+                    n_curves = len(digitized_df.columns) - 1
+                    if n_curves > 0:
+                        fig, axes = plt.subplots(1, n_curves, figsize=(4 * n_curves, 10), sharey=True)
+                        if n_curves == 1:
+                            axes = [axes]
+                        for idx, col in enumerate(digitized_df.columns[1:]):
+                            ax = axes[idx]
+                            ax.plot(digitized_df[col], digitized_df["DEPTH"], linewidth=0.8)
+                            ax.set_title(col, fontsize=10, fontweight="bold")
+                            ax.set_xlabel(col)
+                            ax.invert_yaxis()
+                            ax.grid(True, alpha=0.3)
+                            if idx == 0:
+                                ax.set_ylabel("Depth")
+                        plt.tight_layout()
+                        st.pyplot(fig)
+
+                    # Store and continue to interpretation
+                    st.session_state["digitized_df"] = digitized_df
+                    df = digitized_df
+                    is_raster_pdf = False
+
+                    st.markdown("---")
+                    st.markdown(
+                        "The digitized data is ready. **Scroll down** or switch tabs to see "
+                        "the full automatic interpretation."
+                    )
+
+                    # Download digitized data
+                    csv_buf = io.StringIO()
+                    digitized_df.to_csv(csv_buf, index=False)
+                    st.download_button(
+                        "Download Digitized Data (CSV)",
+                        csv_buf.getvalue(),
+                        file_name="digitized_log.csv",
+                        mime="text/csv",
+                    )
+
+    # If still raster (user hasn't digitized yet), check session state
     if is_raster_pdf:
-        st.stop()  # No numeric data to interpret
+        if "digitized_df" in st.session_state:
+            df = st.session_state["digitized_df"]
+            is_raster_pdf = False
+        else:
+            st.stop()
 
 # ---------------------------------------------------------------------------
 # We have numeric data – proceed with interpretation
