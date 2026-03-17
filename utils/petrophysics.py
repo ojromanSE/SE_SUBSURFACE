@@ -301,16 +301,20 @@ def compute_net_pay_summary(
     if len(df) < 2 or depth_col not in df.columns:
         return empty
 
-    # Estimate depth step as a scalar float
-    depth_diffs = df[depth_col].dropna().diff().dropna()
+    # Get depth as a plain 1-D array to avoid issues with duplicate columns
+    depth_vals = pd.to_numeric(df[depth_col].iloc[:, 0] if isinstance(df[depth_col], pd.DataFrame) else df[depth_col], errors="coerce").dropna()
+    if len(depth_vals) < 2:
+        return empty
+
+    depth_diffs = depth_vals.diff().dropna().values  # numpy array
     if len(depth_diffs) == 0:
         depth_step = 0.5
     else:
-        depth_step = float(depth_diffs.median())
+        depth_step = float(np.nanmedian(depth_diffs))
         if np.isnan(depth_step) or depth_step <= 0:
             depth_step = 0.5
 
-    gross = float(df[depth_col].max() - df[depth_col].min())
+    gross = float(depth_vals.max() - depth_vals.min())
     net_res = float(df["NET_RESERVOIR"].sum()) * abs(depth_step)
     net_pay = float(df["NET_PAY"].sum()) * abs(depth_step)
     ntg = net_pay / gross if gross > 0 else 0
