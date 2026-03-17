@@ -104,6 +104,14 @@ def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
         max_len = max(len(header), max(len(r) for r in all_rows))
         header = header + [""] * (max_len - len(header))
         all_rows = [r + [""] * (max_len - len(r)) for r in all_rows]
+        # Deduplicate header names to avoid DataFrame returning a DF for a column
+        seen: dict[str, int] = {}
+        for i, h in enumerate(header):
+            if h in seen:
+                seen[h] += 1
+                header[i] = f"{h}_{seen[h]}"
+            else:
+                seen[h] = 0
         df = pd.DataFrame(all_rows, columns=header)
     else:
         df = pd.DataFrame(all_rows)
