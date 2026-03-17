@@ -129,7 +129,7 @@ if is_raster_pdf:
     with tab_images:
         st.subheader("Scanned Well Log Pages")
         for i, img in enumerate(pdf_images):
-            st.image(img, caption=f"Page {i + 1}", use_container_width=True)
+            st.image(img, caption=f"Page {i + 1}", width="stretch")
 
     # -- Tab: Upload pre-digitized file --
     with tab_raw_data:
@@ -214,9 +214,9 @@ if is_raster_pdf:
             # Show annotated image with detected boundaries
             if auto_tracks:
                 annotated = annotate_image_with_tracks(work_img, auto_tracks)
-                st.image(annotated, caption="Detected track boundaries (colored lines)", use_container_width=True)
+                st.image(annotated, caption="Detected track boundaries (colored lines)", width="stretch")
             else:
-                st.image(work_img, caption="Original image", use_container_width=True)
+                st.image(work_img, caption="Original image", width="stretch")
                 st.warning("Could not auto-detect tracks. Define them manually below.")
 
             # --- Step 4: Configure each track ---
@@ -308,7 +308,7 @@ if is_raster_pdf:
 
             # --- Step 5: Digitize ---
             st.markdown("### Step 3: Digitize")
-            if st.button("Digitize Log Image", type="primary", use_container_width=True):
+            if st.button("Digitize Log Image", type="primary", width="stretch"):
                 with st.spinner("Tracing curves from image..."):
                     digitized_df = digitize_log_image(
                         work_img,
@@ -328,7 +328,7 @@ if is_raster_pdf:
 
                     # Preview the digitized data
                     st.markdown("**Preview of digitized data:**")
-                    st.dataframe(digitized_df.head(20), use_container_width=True)
+                    st.dataframe(digitized_df.head(20), width="stretch")
 
                     # Quick plot of digitized curves
                     st.markdown("**Digitized curves:**")
@@ -473,14 +473,14 @@ with tab_plot:
 # ---------------------------------------------------------------------------
 with tab_data:
     st.subheader("Raw & Interpreted Data")
-    st.dataframe(result, use_container_width=True, height=500)
+    st.dataframe(result, width="stretch", height=500)
 
     col1, col2 = st.columns(2)
     with col1:
         st.write("**Columns:**", list(result.columns))
     with col2:
         st.write("**Statistics:**")
-        st.dataframe(result.describe().round(4), use_container_width=True)
+        st.dataframe(result.describe().round(4), width="stretch")
 
     csv_buf = io.StringIO()
     result.to_csv(csv_buf, index=False)
@@ -612,7 +612,7 @@ with tab_advanced:
         with cc3:
             sw_cutoff = st.slider("Sw cutoff", 0.0, 1.0, 0.60, 0.05)
 
-    if st.button("Re-run with Custom Parameters", type="primary", use_container_width=True):
+    if st.button("Re-run with Custom Parameters", type="primary", width="stretch"):
         custom = df.copy()
 
         # Vshale
