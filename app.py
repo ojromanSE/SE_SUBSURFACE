@@ -19,6 +19,7 @@ from utils.parsers import (
     parse_pdf,
     extract_pdf_images,
     detect_log_curves,
+    merge_log_dataframes,
 )
 from utils.digitizer import (
     suggest_tracks,
@@ -59,68 +60,103 @@ st.set_page_config(
 
 st.title("Subsurface Log Interpreter")
 st.markdown(
-    "Upload a well log file and get an **instant plain-English interpretation**. "
+    "Upload well log files and get an **instant plain-English interpretation**. "
     "No petrophysics knowledge required."
 )
 
 # ---------------------------------------------------------------------------
 # Sidebar – File Upload
 # ---------------------------------------------------------------------------
-st.sidebar.header("Upload Log File")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload a well log file",
+st.sidebar.header("Upload Log Files")
+uploaded_files = st.sidebar.file_uploader(
+    "Upload one or more well log files",
     type=["las", "csv", "xlsx", "xls", "pdf"],
-    help="Supported: LAS, CSV, Excel, PDF (text tables or scanned images)",
+    accept_multiple_files=True,
+    help="Upload multiple files for the same well (e.g. separate LAS runs for different depth sections). They will be merged on DEPTH.",
 )
 
-if uploaded_file is None:
+if not uploaded_files:
     st.info(
-        "**Getting started:** Upload a well log file using the sidebar.\n\n"
+        "**Getting started:** Upload well log files using the sidebar.\n\n"
         "Supported formats:\n"
         "- **LAS** – Log ASCII Standard (preferred)\n"
         "- **CSV / Excel** – Tabular log data with a depth column\n"
         "- **PDF** – Text-based tables *or* scanned raster images\n\n"
+        "You can upload **multiple files** for the same well "
+        "(e.g. separate runs covering different depth sections or different log suites). "
+        "They will be automatically merged on depth.\n\n"
         "The tool will **automatically interpret** the data and give you a "
         "plain-English summary — no adjustments needed."
     )
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Parse the uploaded file
+# Parse the uploaded file(s)
 # ---------------------------------------------------------------------------
-file_bytes = uploaded_file.read()
-filename = uploaded_file.name.lower()
-
-df = pd.DataFrame()
+parsed_dfs = []
 pdf_images = []
 is_raster_pdf = False
+file_summaries = []
 
-try:
-    if filename.endswith(".las"):
-        df = parse_las(file_bytes, filename)
-    elif filename.endswith((".csv", ".xlsx", ".xls")):
-        df = parse_csv_excel(file_bytes, filename)
-    elif filename.endswith(".pdf"):
-        try:
-            df = parse_pdf(file_bytes, filename)
-        except Exception:
-            df = pd.DataFrame()
-        if df.empty:
-            # Raster / scanned PDF – extract images instead
-            pdf_images = extract_pdf_images(file_bytes)
-            is_raster_pdf = True
+for uploaded_file in uploaded_files:
+    file_bytes = uploaded_file.read()
+    filename = uploaded_file.name.lower()
+
+    try:
+        if filename.endswith(".las"):
+            parsed = parse_las(file_bytes, filename)
+            parsed_dfs.append(parsed)
+            file_summaries.append(f"**{uploaded_file.name}** — {len(parsed)} rows, {len(parsed.columns)} curves (LAS)")
+        elif filename.endswith((".csv", ".xlsx", ".xls")):
+            parsed = parse_csv_excel(file_bytes, filename)
+            parsed_dfs.append(parsed)
+            file_summaries.append(f"**{uploaded_file.name}** — {len(parsed)} rows, {len(parsed.columns)} curves")
+        elif filename.endswith(".pdf"):
+            try:
+                parsed = parse_pdf(file_bytes, filename)
+            except Exception:
+                parsed = pd.DataFrame()
+            if parsed.empty:
+                # Raster / scanned PDF – extract images
+                pdf_images.extend(extract_pdf_images(file_bytes))
+                is_raster_pdf = True
+                file_summaries.append(f"**{uploaded_file.name}** — scanned/raster PDF")
+            else:
+                parsed_dfs.append(parsed)
+                file_summaries.append(f"**{uploaded_file.name}** — {len(parsed)} rows, {len(parsed.columns)} curves (PDF)")
+        else:
+            st.warning(f"Skipping unsupported file: {uploaded_file.name}")
+    except Exception as e:
+        st.warning(f"Error parsing **{uploaded_file.name}**: {e}")
+
+# Merge all parsed DataFrames
+if parsed_dfs:
+    if len(parsed_dfs) == 1:
+        df = parsed_dfs[0]
     else:
-        st.error(f"Unsupported file format: {filename}")
-        st.stop()
-except Exception as e:
-    st.error(f"Error parsing file: {e}")
+        df = merge_log_dataframes(parsed_dfs)
+    # If we also have raster PDFs alongside tabular data, tabular wins
+    is_raster_pdf = False
+else:
+    df = pd.DataFrame()
+
+# Show what was loaded
+if file_summaries:
+    with st.sidebar.expander("Loaded files", expanded=True):
+        for s in file_summaries:
+            st.markdown(f"- {s}")
+        if len(parsed_dfs) > 1:
+            st.markdown(f"- **Merged** — {len(df)} rows, {len(df.columns)} curves")
+
+if df.empty and not is_raster_pdf:
+    st.error("No data could be extracted from the uploaded file(s).")
     st.stop()
 
 # ---------------------------------------------------------------------------
 # Handle raster PDFs – built-in digitizer
 # ---------------------------------------------------------------------------
 if is_raster_pdf:
-    st.success(f"Loaded **{uploaded_file.name}** — scanned/raster PDF with {len(pdf_images)} page(s)")
+    st.success(f"Loaded scanned/raster PDF with {len(pdf_images)} page(s)")
 
     tab_digitizer, tab_images, tab_raw_data = st.tabs([
         "Digitize Log",
@@ -387,8 +423,10 @@ if is_raster_pdf:
 # ---------------------------------------------------------------------------
 detected = detect_log_curves(df)
 
+_n_files = len(uploaded_files)
 st.success(
-    f"Loaded **{uploaded_file.name}** — {len(df)} data points, {len(df.columns)} curves detected"
+    f"Loaded **{_n_files} file{'s' if _n_files > 1 else ''}** — "
+    f"{len(df)} data points, {len(df.columns)} curves detected"
 )
 
 # Auto-run interpretation
