@@ -124,10 +124,23 @@ def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
     df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
 
     # Try to identify depth column
+    depth_found = False
     for col in df.columns:
         if str(col).upper() in ("DEPTH", "DEPT", "MD", "TVD", "MEASURED_DEPTH"):
             df = df.rename(columns={col: "DEPTH"})
+            depth_found = True
             break
+
+    # If no depth column found, check if first column is monotonically increasing (likely depth)
+    if not depth_found and len(df.columns) > 0:
+        first_col = df.iloc[:, 0].dropna()
+        if len(first_col) > 1 and first_col.is_monotonic_increasing:
+            df = df.rename(columns={df.columns[0]: "DEPTH"})
+            depth_found = True
+
+    # Last resort: create a synthetic depth column from row index
+    if not depth_found:
+        df.insert(0, "DEPTH", range(len(df)))
 
     return df
 

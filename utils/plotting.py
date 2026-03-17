@@ -29,6 +29,8 @@ def plot_triple_combo(
     fig, axes = plt.subplots(1, num_tracks, figsize=(16, 12), sharey=True)
     fig.subplots_adjust(wspace=0.05)
 
+    if depth_col not in df.columns:
+        depth_col = "DEPTH" if "DEPTH" in df.columns else df.columns[0]
     depth = df[depth_col]
 
     # ---- Track 1: GR ----
