@@ -7,8 +7,74 @@ import io
 import re
 import lasio
 import pandas as pd
+import numpy as np
 import pdfplumber
 from PIL import Image
+
+
+def merge_log_dataframes(dfs: list, depth_col: str = "DEPTH") -> pd.DataFrame:
+    """
+    Merge multiple well-log DataFrames on a common depth column.
+
+    Handles:
+      - Different depth ranges (e.g. shallow run + deep run)
+      - Overlapping depths with different curves
+      - Duplicate curve names across files (suffixed automatically)
+
+    Strategy:
+      1. Round depth to a common precision so nearby samples align.
+      2. Outer-join on depth so no data is lost.
+      3. For overlapping curves at the same depth, keep the first non-NaN value.
+    """
+    if not dfs:
+        return pd.DataFrame()
+    if len(dfs) == 1:
+        return dfs[0]
+
+    # Determine depth precision from the finest step across all files
+    precisions = []
+    for df in dfs:
+        if depth_col in df.columns and len(df) > 1:
+            step = df[depth_col].dropna().diff().dropna().abs()
+            if len(step) > 0:
+                med = float(np.nanmedian(step.values))
+                if med > 0:
+                    # number of decimals needed
+                    precisions.append(max(0, int(-np.floor(np.log10(med))) + 1))
+    precision = max(precisions) if precisions else 2
+
+    merged = None
+    for i, df in enumerate(dfs):
+        if depth_col not in df.columns:
+            continue
+        tmp = df.copy()
+        tmp[depth_col] = tmp[depth_col].round(precision)
+
+        if merged is None:
+            merged = tmp
+        else:
+            # Suffix overlapping columns (except DEPTH)
+            overlap = set(merged.columns) & set(tmp.columns) - {depth_col}
+            suffix_map = {c: f"{c}_run{i + 1}" for c in overlap}
+            tmp = tmp.rename(columns=suffix_map)
+
+            merged = pd.merge(merged, tmp, on=depth_col, how="outer")
+
+    if merged is None:
+        return dfs[0]
+
+    merged = merged.sort_values(depth_col).reset_index(drop=True)
+
+    # Consolidate duplicate curves: e.g. GR and GR_run2 -> fill NaNs in GR from GR_run2
+    base_cols = [c for c in merged.columns if not re.search(r"_run\d+$", c) and c != depth_col]
+    for base in base_cols:
+        run_cols = [c for c in merged.columns if re.match(rf"^{re.escape(base)}_run\d+$", c)]
+        if run_cols:
+            for rc in run_cols:
+                merged[base] = merged[base].fillna(merged[rc])
+            merged = merged.drop(columns=run_cols)
+
+    return merged
 
 
 def parse_las(file_bytes: bytes, filename: str) -> pd.DataFrame:
