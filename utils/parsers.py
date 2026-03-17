@@ -47,33 +47,41 @@ def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
     all_rows = []
     header = None
 
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table:
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                try:
+                    tables = page.extract_tables()
+                except Exception:
                     continue
-                for i, row in enumerate(table):
-                    # Clean cells
-                    cleaned = []
-                    for cell in row:
-                        if cell is None:
-                            cleaned.append("")
-                        else:
-                            cleaned.append(str(cell).strip())
-
-                    # Identify header row: mostly non-numeric text
-                    if header is None and _looks_like_header(cleaned):
-                        header = cleaned
+                for table in tables:
+                    if not table:
                         continue
+                    for i, row in enumerate(table):
+                        if not isinstance(row, (list, tuple)):
+                            continue
+                        # Clean cells
+                        cleaned = []
+                        for cell in row:
+                            if cell is None:
+                                cleaned.append("")
+                            else:
+                                cleaned.append(str(cell).strip())
 
-                    # Only keep rows with mostly numeric data
-                    if _has_numeric_data(cleaned):
-                        all_rows.append(cleaned)
+                        # Identify header row: mostly non-numeric text
+                        if header is None and _looks_like_header(cleaned):
+                            header = cleaned
+                            continue
 
-        # If no tables found, try text-based extraction
-        if not all_rows:
-            header, all_rows = _extract_from_text(pdf)
+                        # Only keep rows with mostly numeric data
+                        if _has_numeric_data(cleaned):
+                            all_rows.append(cleaned)
+
+            # If no tables found, try text-based extraction
+            if not all_rows:
+                header, all_rows = _extract_from_text(pdf)
+    except Exception:
+        return pd.DataFrame()
 
     if not all_rows:
         # No tabular data found – this is likely a raster/scanned PDF.
@@ -165,26 +173,26 @@ def _extract_from_text(pdf) -> tuple:
 def extract_pdf_images(file_bytes: bytes) -> list:
     """
     Extract raster images from a PDF file.
-    Returns a list of PIL Image objects, one per page that has images.
-    Falls back to rendering full pages if individual image extraction fails.
+    Returns a list of PIL Image objects, one per page.
     """
     images = []
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            # Try to extract embedded images
-            page_images = page.images
-            if page_images:
-                # pdfplumber provides image metadata but not the raw pixels
-                # directly. Convert the full page to an image instead.
-                pil_img = page.to_image(resolution=200).original
-                images.append(pil_img)
-            else:
-                # Page may itself be a full-page raster scan
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
                 try:
-                    pil_img = page.to_image(resolution=200).original
-                    images.append(pil_img)
+                    page_img = page.to_image(resolution=150)
+                    pil_img = page_img.original
+                    if isinstance(pil_img, Image.Image):
+                        images.append(pil_img.copy())
+                    else:
+                        # Fallback: convert via annotated image
+                        annotated = page_img.annotated
+                        if isinstance(annotated, Image.Image):
+                            images.append(annotated.copy())
                 except Exception:
                     continue
+    except Exception:
+        pass
     return images
 
 

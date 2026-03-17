@@ -296,17 +296,23 @@ def compute_net_pay_summary(
     depth_col: str = "DEPTH",
 ) -> dict:
     """Compute net pay thickness and net-to-gross ratio."""
-    if len(df) < 2:
-        return {"gross_thickness": 0, "net_reservoir": 0, "net_pay": 0, "ntg": 0}
+    empty = {"gross_thickness": 0, "net_reservoir": 0, "net_pay": 0, "ntg_ratio": 0}
 
-    # Estimate depth step
-    depth_step = df[depth_col].diff().median()
-    if pd.isna(depth_step) or depth_step <= 0:
-        depth_step = 0.5  # default half-foot
+    if len(df) < 2 or depth_col not in df.columns:
+        return empty
 
-    gross = df[depth_col].max() - df[depth_col].min()
-    net_res = df["NET_RESERVOIR"].sum() * abs(depth_step)
-    net_pay = df["NET_PAY"].sum() * abs(depth_step)
+    # Estimate depth step as a scalar float
+    depth_diffs = df[depth_col].dropna().diff().dropna()
+    if len(depth_diffs) == 0:
+        depth_step = 0.5
+    else:
+        depth_step = float(depth_diffs.median())
+        if np.isnan(depth_step) or depth_step <= 0:
+            depth_step = 0.5
+
+    gross = float(df[depth_col].max() - df[depth_col].min())
+    net_res = float(df["NET_RESERVOIR"].sum()) * abs(depth_step)
+    net_pay = float(df["NET_PAY"].sum()) * abs(depth_step)
     ntg = net_pay / gross if gross > 0 else 0
 
     return {
