@@ -101,7 +101,10 @@ try:
     elif filename.endswith((".csv", ".xlsx", ".xls")):
         df = parse_csv_excel(file_bytes, filename)
     elif filename.endswith(".pdf"):
-        df = parse_pdf(file_bytes, filename)
+        try:
+            df = parse_pdf(file_bytes, filename)
+        except Exception:
+            df = pd.DataFrame()
         if df.empty:
             # Raster / scanned PDF – extract images instead
             pdf_images = extract_pdf_images(file_bytes)
