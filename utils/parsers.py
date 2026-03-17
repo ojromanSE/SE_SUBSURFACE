@@ -14,11 +14,22 @@ from PIL import Image
 def parse_las(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Parse a LAS file and return a DataFrame with depth as the index."""
     text = file_bytes.decode("utf-8", errors="replace")
-    las = lasio.read(io.StringIO(text))
+    las = lasio.read(io.StringIO(text), engine="normal")
     df = las.df().reset_index()
     # Normalize the depth column name
     depth_col = df.columns[0]
     df = df.rename(columns={depth_col: "DEPTH"})
+    # Deduplicate column names to prevent downstream errors
+    if df.columns.duplicated().any():
+        cols = list(df.columns)
+        seen = {}
+        for i, c in enumerate(cols):
+            if c in seen:
+                seen[c] += 1
+                cols[i] = f"{c}_{seen[c]}"
+            else:
+                seen[c] = 0
+        df.columns = cols
     return df
 
 
