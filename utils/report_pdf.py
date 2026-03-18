@@ -17,6 +17,30 @@ import pandas as pd
 from fpdf import FPDF
 
 
+def _sanitize(text: str) -> str:
+    """Replace Unicode characters unsupported by built-in PDF fonts."""
+    replacements = {
+        "\u2013": "-",   # en-dash
+        "\u2014": "--",  # em-dash
+        "\u2018": "'",   # left single quote
+        "\u2019": "'",   # right single quote
+        "\u201c": '"',   # left double quote
+        "\u201d": '"',   # right double quote
+        "\u2022": "*",   # bullet
+        "\u2026": "...", # ellipsis
+        "\u00b0": "deg", # degree
+        "\u00b1": "+/-", # plus-minus
+        "\u2265": ">=",  # greater-equal
+        "\u2264": "<=",  # less-equal
+        "\u03c6": "phi", # phi
+        "\u03a6": "Phi", # Phi
+    }
+    for char, repl in replacements.items():
+        text = text.replace(char, repl)
+    # Fallback: encode to latin-1, replacing anything still unsupported
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
 class _ReportPDF(FPDF):
     """Custom PDF with header/footer branding."""
 
@@ -53,7 +77,7 @@ class _ReportPDF(FPDF):
     def body_text(self, text: str):
         self.set_font("Helvetica", "", 10)
         self.set_text_color(30, 30, 30)
-        self.multi_cell(0, 5, text)
+        self.multi_cell(0, 5, _sanitize(text))
         self.ln(2)
 
     def metric_row(self, label: str, value: str):
@@ -150,7 +174,7 @@ def generate_report_pdf(
     pdf.section_title("Technical Petrophysical Report")
     pdf.set_font("Courier", "", 8)
     pdf.set_text_color(30, 30, 30)
-    pdf.multi_cell(0, 4, technical_report)
+    pdf.multi_cell(0, 4, _sanitize(technical_report))
 
     # -- Output --------------------------------------------------------------
     buf = io.BytesIO()
