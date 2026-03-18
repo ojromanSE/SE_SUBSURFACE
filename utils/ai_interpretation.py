@@ -208,7 +208,7 @@ def generate_gemini_interpretation(
 
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
-        model="gemini-2.0-flash-lite",
+        model="gemini-2.5-flash",
         contents=user_message,
         config=genai.types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
