@@ -53,6 +53,7 @@ from utils.ai_interpretation import (
     get_available_providers,
     PROVIDERS,
 )
+from utils.report_pdf import generate_report_pdf
 
 # ---------------------------------------------------------------------------
 # Page Config
@@ -571,35 +572,36 @@ with tab_verbal:
 
         if "ai_interpretation" in st.session_state:
             st.markdown(st.session_state["ai_interpretation"])
-            st.download_button(
-                "Download AI Interpretation (TXT)",
-                st.session_state["ai_interpretation"],
-                file_name="ai_interpretation.txt",
-                mime="text/plain",
-                key="dl_ai_interp",
-            )
 
-    # Download
+    # PDF Report Download
     st.markdown("---")
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        st.download_button(
-            "Download Interpretation (TXT)",
-            verbal,
-            file_name="well_interpretation.txt",
-            mime="text/plain",
-        )
-    with col_dl2:
-        technical_report = generate_interpretation_summary(
-            result, net_stats, detected,
-            vshale_col="VSHALE", porosity_col="PHIE", sw_col="SW",
-        )
-        st.download_button(
-            "Download Technical Report (TXT)",
-            technical_report,
-            file_name="technical_report.txt",
-            mime="text/plain",
-        )
+    technical_report = generate_interpretation_summary(
+        result, net_stats, detected,
+        vshale_col="VSHALE", porosity_col="PHIE", sw_col="SW",
+    )
+    log_fig = plot_triple_combo(
+        result, detected,
+        vshale_col="VSHALE", porosity_col="PHIE",
+        sw_col="SW", net_pay_col="NET_PAY",
+    )
+    import matplotlib.pyplot as plt
+    ai_text = st.session_state.get("ai_interpretation")
+    pdf_bytes = generate_report_pdf(
+        verbal=verbal,
+        technical_report=technical_report,
+        net_stats=net_stats,
+        result_df=result,
+        fig=log_fig,
+        ai_interpretation=ai_text,
+    )
+    plt.close(log_fig)
+    st.download_button(
+        "Download Full Report (PDF)",
+        pdf_bytes,
+        file_name="well_interpretation_report.pdf",
+        mime="application/pdf",
+        type="primary",
+    )
 
 # ---------------------------------------------------------------------------
 # Tab 2: Log Plot
