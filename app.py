@@ -533,7 +533,7 @@ with tab_verbal:
         provider = st.selectbox(
             "AI Provider",
             available_providers,
-            help="**Gemini (Free)** — Google's Gemini Flash, free tier with 15 req/min. "
+            help="**Gemini (Free)** — Google's Gemini Flash Lite, free tier with 30 req/min. "
                  "**Claude (Paid)** — Anthropic's Claude Sonnet, requires credits.",
             key="ai_provider",
         )
