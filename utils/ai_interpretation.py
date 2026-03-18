@@ -1,12 +1,15 @@
 """
-AI-enhanced well log interpretation using Claude API.
+AI-enhanced well log interpretation using Claude or Google Gemini.
 
 Takes the deterministic petrophysical results (Vshale, porosity, Sw, net pay)
-and sends them to Claude for a richer, context-aware narrative interpretation
+and sends them to an LLM for a richer, context-aware narrative interpretation
 that reads like an expert petrophysicist's report.
+
+Supported providers:
+  - Google Gemini (free tier available)
+  - Anthropic Claude (paid)
 """
 
-import os
 import numpy as np
 import pandas as pd
 
@@ -16,6 +19,16 @@ try:
 except ImportError:
     HAS_ANTHROPIC = False
 
+try:
+    from google import genai
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+
+
+# ---------------------------------------------------------------------------
+# Metrics builder (shared by all providers)
+# ---------------------------------------------------------------------------
 
 def _build_metrics_summary(
     df: pd.DataFrame,
@@ -120,6 +133,10 @@ def _build_metrics_summary(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Shared system prompt
+# ---------------------------------------------------------------------------
+
 SYSTEM_PROMPT = """\
 You are a senior petrophysicist with 25+ years of experience in formation \
 evaluation. You interpret well log data for a living and write clear, \
@@ -163,34 +180,58 @@ incorporate that knowledge into your interpretation.\
 """
 
 
-def generate_ai_interpretation(
+# ---------------------------------------------------------------------------
+# Provider: Google Gemini (free tier available)
+# ---------------------------------------------------------------------------
+
+def generate_gemini_interpretation(
     df: pd.DataFrame,
     net_stats: dict,
     detected: dict,
     api_key: str,
     geological_context: str = "",
 ) -> str:
-    """
-    Generate an AI-enhanced interpretation using the Claude API.
+    """Generate AI interpretation using Google Gemini."""
+    if not HAS_GEMINI:
+        return (
+            "The 'google-genai' package is not installed. "
+            "Run: pip install google-genai"
+        )
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Interpreted log data with VSHALE, PHIE, SW, NET_PAY columns.
-    net_stats : dict
-        Net pay summary from compute_net_pay_summary().
-    detected : dict
-        Detected curve mapping from detect_log_curves().
-    api_key : str
-        Anthropic API key.
-    geological_context : str, optional
-        User-provided context (basin, formation, fluid type, etc.).
+    metrics = _build_metrics_summary(df, net_stats, detected)
 
-    Returns
-    -------
-    str
-        AI-generated interpretation text.
-    """
+    user_message = f"Here are the computed petrophysical metrics for this well:\n\n{metrics}"
+    if geological_context.strip():
+        user_message += (
+            f"\n\nGeological context provided by the user:\n{geological_context}"
+        )
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=user_message,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            max_output_tokens=1500,
+            temperature=0.7,
+        ),
+    )
+
+    return response.text
+
+
+# ---------------------------------------------------------------------------
+# Provider: Anthropic Claude (paid)
+# ---------------------------------------------------------------------------
+
+def generate_claude_interpretation(
+    df: pd.DataFrame,
+    net_stats: dict,
+    detected: dict,
+    api_key: str,
+    geological_context: str = "",
+) -> str:
+    """Generate AI interpretation using Claude."""
     if not HAS_ANTHROPIC:
         return (
             "The 'anthropic' package is not installed. "
@@ -216,6 +257,73 @@ def generate_ai_interpretation(
     return message.content[0].text
 
 
+# ---------------------------------------------------------------------------
+# Unified entry point
+# ---------------------------------------------------------------------------
+
+PROVIDERS = {
+    "Gemini (Free)": {
+        "func": generate_gemini_interpretation,
+        "available": lambda: HAS_GEMINI,
+        "key_help": "Get a free API key from aistudio.google.com",
+        "key_prefix": "",
+    },
+    "Claude (Paid)": {
+        "func": generate_claude_interpretation,
+        "available": lambda: HAS_ANTHROPIC,
+        "key_help": "Get an API key from console.anthropic.com (requires credits)",
+        "key_prefix": "sk-ant-",
+    },
+}
+
+
+def generate_ai_interpretation(
+    df: pd.DataFrame,
+    net_stats: dict,
+    detected: dict,
+    api_key: str,
+    provider: str = "Gemini (Free)",
+    geological_context: str = "",
+) -> str:
+    """
+    Generate an AI-enhanced interpretation using the selected provider.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Interpreted log data with VSHALE, PHIE, SW, NET_PAY columns.
+    net_stats : dict
+        Net pay summary from compute_net_pay_summary().
+    detected : dict
+        Detected curve mapping from detect_log_curves().
+    api_key : str
+        API key for the selected provider.
+    provider : str
+        One of the keys in PROVIDERS dict.
+    geological_context : str, optional
+        User-provided context (basin, formation, fluid type, etc.).
+
+    Returns
+    -------
+    str
+        AI-generated interpretation text.
+    """
+    prov = PROVIDERS.get(provider)
+    if prov is None:
+        return f"Unknown provider: {provider}"
+
+    if not prov["available"]():
+        pkg = "google-genai" if "Gemini" in provider else "anthropic"
+        return f"Required package not installed. Run: pip install {pkg}"
+
+    return prov["func"](df, net_stats, detected, api_key, geological_context)
+
+
+def get_available_providers() -> list:
+    """Return list of provider names whose packages are installed."""
+    return [name for name, p in PROVIDERS.items() if p["available"]()]
+
+
 def is_available() -> bool:
-    """Check if the anthropic package is installed."""
-    return HAS_ANTHROPIC
+    """Check if at least one AI provider is installed."""
+    return HAS_GEMINI or HAS_ANTHROPIC
