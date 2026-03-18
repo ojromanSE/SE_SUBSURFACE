@@ -47,7 +47,12 @@ from utils.petrophysics import (
     compute_net_pay,
 )
 from utils.plotting import plot_triple_combo
-from utils.ai_interpretation import generate_ai_interpretation, is_available as ai_available
+from utils.ai_interpretation import (
+    generate_ai_interpretation,
+    is_available as ai_available,
+    get_available_providers,
+    PROVIDERS,
+)
 
 # ---------------------------------------------------------------------------
 # Page Config
@@ -513,55 +518,66 @@ with tab_verbal:
     st.markdown("---")
     st.markdown("### AI-Enhanced Interpretation")
     st.markdown(
-        "Get a deeper, expert-level interpretation powered by Claude. "
-        "The AI analyzes patterns across zones, identifies risks in the "
+        "Get a deeper, expert-level interpretation powered by AI. "
+        "It analyzes patterns across zones, identifies risks in the "
         "default assumptions, and recommends next steps."
     )
 
-    api_key = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        help="Enter your Anthropic API key to enable AI interpretation. "
-             "Your key is not stored — it's only used for this session.",
-        key="anthropic_api_key",
-    )
+    available_providers = get_available_providers()
+    if not available_providers:
+        st.warning(
+            "No AI provider packages installed. "
+            "Run `pip install google-genai` (free) or `pip install anthropic` (paid)."
+        )
+    else:
+        provider = st.selectbox(
+            "AI Provider",
+            available_providers,
+            help="**Gemini (Free)** — Google's Gemini Flash, free tier with 15 req/min. "
+                 "**Claude (Paid)** — Anthropic's Claude Sonnet, requires credits.",
+            key="ai_provider",
+        )
 
-    geo_context = st.text_area(
-        "Geological context (optional)",
-        placeholder="e.g. Permian Basin, Wolfcamp formation, looking for oil. "
-                    "Carbonate reservoir, Rw estimated at 0.03 from DST.",
-        help="Providing basin, formation, fluid type, or other context "
-             "helps the AI give a more specific interpretation.",
-        key="geo_context",
-    )
+        prov_info = PROVIDERS[provider]
+        api_key = st.text_input(
+            f"{provider} API Key",
+            type="password",
+            help=f"{prov_info['key_help']}. "
+                 "Your key is not stored — it's only used for this session.",
+            key="ai_api_key",
+        )
 
-    if st.button("Generate AI Interpretation", type="primary", disabled=not api_key):
-        if not ai_available():
-            st.error(
-                "The `anthropic` package is not installed. "
-                "Run `pip install anthropic` and restart the app."
-            )
-        else:
-            with st.spinner("Claude is analyzing your well log..."):
+        geo_context = st.text_area(
+            "Geological context (optional)",
+            placeholder="e.g. Permian Basin, Wolfcamp formation, looking for oil. "
+                        "Carbonate reservoir, Rw estimated at 0.03 from DST.",
+            help="Providing basin, formation, fluid type, or other context "
+                 "helps the AI give a more specific interpretation.",
+            key="geo_context",
+        )
+
+        if st.button("Generate AI Interpretation", type="primary", disabled=not api_key):
+            with st.spinner("AI is analyzing your well log..."):
                 try:
                     ai_text = generate_ai_interpretation(
                         result, net_stats, detected,
                         api_key=api_key,
+                        provider=provider,
                         geological_context=geo_context,
                     )
                     st.session_state["ai_interpretation"] = ai_text
                 except Exception as e:
                     st.error(f"AI interpretation failed: {e}")
 
-    if "ai_interpretation" in st.session_state:
-        st.markdown(st.session_state["ai_interpretation"])
-        st.download_button(
-            "Download AI Interpretation (TXT)",
-            st.session_state["ai_interpretation"],
-            file_name="ai_interpretation.txt",
-            mime="text/plain",
-            key="dl_ai_interp",
-        )
+        if "ai_interpretation" in st.session_state:
+            st.markdown(st.session_state["ai_interpretation"])
+            st.download_button(
+                "Download AI Interpretation (TXT)",
+                st.session_state["ai_interpretation"],
+                file_name="ai_interpretation.txt",
+                mime="text/plain",
+                key="dl_ai_interp",
+            )
 
     # Download
     st.markdown("---")
