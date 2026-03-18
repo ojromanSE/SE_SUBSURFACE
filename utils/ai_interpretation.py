@@ -227,7 +227,8 @@ depletion from offsets).
 
 FORMAT REQUIREMENTS:
 - Use markdown headers (##) for each section.
-- Be thorough and detailed - aim for 1000-1500 words minimum.
+- Keep the total report around 400-500 words. Be concise but substantive.
+- Combine or condense sections where appropriate to stay within the word limit.
 - Use technical terms appropriately but explain complex concepts.
 - Include specific numbers from the metrics to support your conclusions.
 - Be honest about limitations and uncertainties.
@@ -270,7 +271,7 @@ def generate_gemini_interpretation(
         contents=user_message,
         config=genai.types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=8000,
+            max_output_tokens=2500,
             temperature=0.7,
         ),
     )
