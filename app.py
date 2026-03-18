@@ -47,6 +47,7 @@ from utils.petrophysics import (
     compute_net_pay,
 )
 from utils.plotting import plot_triple_combo
+from utils.ai_interpretation import generate_ai_interpretation, is_available as ai_available
 
 # ---------------------------------------------------------------------------
 # Page Config
@@ -88,6 +89,42 @@ if not uploaded_files:
         "The tool will **automatically interpret** the data and give you a "
         "plain-English summary — no adjustments needed."
     )
+
+    with st.expander("How is the interpretation generated?", expanded=False):
+        st.markdown(
+            "### Interpretation Methodology\n\n"
+            "This tool uses **industry-standard petrophysical methods** to "
+            "interpret your well log data. No AI or machine learning is used "
+            "in the core calculations — they are deterministic and reproducible.\n\n"
+            "#### Methods Used\n\n"
+            "| Property | Method | Reference |\n"
+            "|---|---|---|\n"
+            "| **Shale Volume** | Larionov (1969) Tertiary correction from Gamma Ray | Asquith & Krygowski (2004) |\n"
+            "| **Porosity** | Density porosity (Wyllie equation) or Neutron-Density crossplot | Asquith & Krygowski (2004), Ch. 5-6 |\n"
+            "| **Water Saturation** | Archie (1942) equation: a=1, m=2, n=2, Rw=0.05 | Archie, Trans. AIME 146 |\n"
+            "| **Net Pay** | SPE 131529 methodology: Vsh<0.40, Phi>0.08, Sw<0.60 | Worthington (2010) |\n\n"
+            "#### Default Assumptions\n\n"
+            "- **Sandstone matrix** density: 2.65 g/cc\n"
+            "- **Fluid density**: 1.0 g/cc (freshwater)\n"
+            "- **GR endpoints**: Auto-picked at P5 (clean) and P95 (shale)\n"
+            "- **Archie parameters**: Tortuosity a=1.0, Cementation m=2.0, Saturation exponent n=2.0\n\n"
+            "These defaults work well for most clastic reservoirs. For carbonates or "
+            "unconventional formations, use the **Advanced Settings** tab to adjust.\n\n"
+            "#### AI-Enhanced Interpretation\n\n"
+            "Optionally, you can enable an **AI-powered interpretation** (requires an "
+            "Anthropic API key). This sends the computed metrics to Claude, which provides:\n"
+            "- Pattern recognition across zones\n"
+            "- Cross-curve insights and anomaly detection\n"
+            "- Risk factors and parameter sensitivity notes\n"
+            "- Actionable next-step recommendations\n\n"
+            "#### Key References\n\n"
+            "- **SPE-PRMS (2018)**: Petroleum Resources Management System\n"
+            "- **Archie, G.E. (1942)**: *The Electrical Resistivity Log as an Aid in "
+            "Determining Some Reservoir Characteristics*, Trans. AIME 146\n"
+            "- **Worthington, P.F. (2010)**: SPE 131529 — Net Pay definition\n"
+            "- **Asquith & Krygowski (2004)**: *Basic Well Log Analysis*, AAPG Methods No. 16\n"
+            "- **Poupon & Leveaux (1971)**: Indonesia equation for shaly sands"
+        )
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -471,6 +508,60 @@ with tab_verbal:
     mc2.metric("Avg Water Saturation", f"{avg_sw:.1%}")
     mc3.metric("Net Pay", f"{net_stats['net_pay']:.0f}")
     mc4.metric("Net-to-Gross", f"{net_stats['ntg_ratio']:.1%}")
+
+    # --- AI-Enhanced Interpretation ---
+    st.markdown("---")
+    st.markdown("### AI-Enhanced Interpretation")
+    st.markdown(
+        "Get a deeper, expert-level interpretation powered by Claude. "
+        "The AI analyzes patterns across zones, identifies risks in the "
+        "default assumptions, and recommends next steps."
+    )
+
+    api_key = st.text_input(
+        "Anthropic API Key",
+        type="password",
+        help="Enter your Anthropic API key to enable AI interpretation. "
+             "Your key is not stored — it's only used for this session.",
+        key="anthropic_api_key",
+    )
+
+    geo_context = st.text_area(
+        "Geological context (optional)",
+        placeholder="e.g. Permian Basin, Wolfcamp formation, looking for oil. "
+                    "Carbonate reservoir, Rw estimated at 0.03 from DST.",
+        help="Providing basin, formation, fluid type, or other context "
+             "helps the AI give a more specific interpretation.",
+        key="geo_context",
+    )
+
+    if st.button("Generate AI Interpretation", type="primary", disabled=not api_key):
+        if not ai_available():
+            st.error(
+                "The `anthropic` package is not installed. "
+                "Run `pip install anthropic` and restart the app."
+            )
+        else:
+            with st.spinner("Claude is analyzing your well log..."):
+                try:
+                    ai_text = generate_ai_interpretation(
+                        result, net_stats, detected,
+                        api_key=api_key,
+                        geological_context=geo_context,
+                    )
+                    st.session_state["ai_interpretation"] = ai_text
+                except Exception as e:
+                    st.error(f"AI interpretation failed: {e}")
+
+    if "ai_interpretation" in st.session_state:
+        st.markdown(st.session_state["ai_interpretation"])
+        st.download_button(
+            "Download AI Interpretation (TXT)",
+            st.session_state["ai_interpretation"],
+            file_name="ai_interpretation.txt",
+            mime="text/plain",
+            key="dl_ai_interp",
+        )
 
     # Download
     st.markdown("---")
