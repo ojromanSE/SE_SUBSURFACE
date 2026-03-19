@@ -117,6 +117,56 @@ class _ReportPDF(FPDF):
         self.set_font(self._body_font, "", 10)
         self.cell(0, 6, value, new_x="LMARGIN", new_y="NEXT")
 
+    def _available_height(self) -> float:
+        """Return remaining vertical space (mm) on the current page."""
+        return self.h - self.get_y() - 20  # 20 mm bottom margin
+
+    def body_text_fit_page(self, text: str, font_family: str | None = None,
+                           style: str = "", max_size: float = 10,
+                           min_size: float = 6):
+        """Render *text* so it fits entirely on the current page.
+
+        Starts at *max_size* pt and shrinks by 0.5 pt until the text
+        fits the available vertical space (down to *min_size*).  If it
+        still overflows at the minimum size the text is truncated.
+        """
+        font_family = font_family or self._body_font
+        avail = self._available_height()
+
+        # Try decreasing font sizes until the text fits
+        for sz_x10 in range(int(max_size * 10), int(min_size * 10) - 1, -5):
+            sz = sz_x10 / 10
+            lh = max(sz * 0.45, 3.0)  # line height in mm
+            self.set_font(font_family, style, sz)
+            # Estimate height via a dry-run multi_cell
+            lines = self.multi_cell(
+                0, lh, self._safe(text), dry_run=True, output="LINES"
+            )
+            needed = len(lines) * lh
+            if needed <= avail:
+                self.set_text_color(30, 30, 30)
+                self.multi_cell(0, lh, self._safe(text))
+                self.ln(2)
+                return
+
+        # At minimum size – truncate line-by-line until it fits
+        sz = min_size
+        lh = max(sz * 0.45, 3.0)
+        self.set_font(font_family, style, sz)
+        max_lines = int(avail / lh) - 1  # reserve one line for note
+        lines = self.multi_cell(
+            0, lh, self._safe(text), dry_run=True, output="LINES"
+        )
+        truncated = lines[:max_lines]
+        self.set_text_color(30, 30, 30)
+        for ln_text in truncated:
+            self.cell(0, lh, ln_text, new_x="LMARGIN", new_y="NEXT")
+        self.set_font(font_family, "I", sz)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, lh, "[... truncated to fit page]",
+                  new_x="LMARGIN", new_y="NEXT")
+        self.ln(2)
+
 
 def generate_report_pdf(
     verbal: str,
@@ -198,14 +248,13 @@ def generate_report_pdf(
     if ai_interpretation:
         pdf.add_page()
         pdf.section_title("AI-Enhanced Interpretation")
-        pdf.body_text(ai_interpretation)
+        pdf.body_text_fit_page(ai_interpretation, max_size=10, min_size=6)
 
     # -- Technical Report ----------------------------------------------------
     pdf.add_page()
     pdf.section_title("Technical Petrophysical Report")
-    pdf.set_font(pdf._mono_font, "", 8)
-    pdf.set_text_color(30, 30, 30)
-    pdf.multi_cell(0, 4, pdf._safe(technical_report))
+    pdf.body_text_fit_page(technical_report, font_family=pdf._mono_font,
+                           max_size=8, min_size=5)
 
     # -- Output --------------------------------------------------------------
     buf = io.BytesIO()
