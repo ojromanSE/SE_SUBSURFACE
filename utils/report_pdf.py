@@ -232,8 +232,9 @@ def generate_report_pdf(
     pdf.ln(4)
 
     # -- Verbal Interpretation -----------------------------------------------
+    pdf.add_page()
     pdf.section_title("Plain-English Interpretation")
-    pdf.body_text(verbal)
+    pdf.body_text_fit_page(verbal, max_size=10, min_size=6)
 
     # -- Log Plot ------------------------------------------------------------
     if fig is not None:
