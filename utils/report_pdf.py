@@ -18,6 +18,17 @@ import pandas as pd
 from fpdf import FPDF
 
 
+# Brand colours (maroon / burgundy)
+_MAROON = (100, 20, 40)
+_MAROON_LIGHT = (140, 40, 60)
+_GREY_DARK = (50, 50, 50)
+_GREY_TEXT = (30, 30, 30)
+_GREY_SUB = (80, 80, 80)
+_GREY_MUTED = (128, 128, 128)
+
+# Logo path (relative to this file)
+_LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "se_logo.png"
+
 # Common paths where DejaVu fonts live on Linux
 _DEJAVU_PATHS = [
     Path("/usr/share/fonts/truetype/dejavu"),
@@ -77,11 +88,19 @@ class _ReportPDF(FPDF):
 
     def header(self):
         self._load_fonts()
+        # Logo in header (small)
+        if _LOGO_PATH.exists():
+            self.image(str(_LOGO_PATH), x=10, y=8, h=10)
+            text_x = 22
+        else:
+            text_x = 10
+        self.set_x(text_x)
         self.set_font(self._body_font, "B", 10)
-        self.set_text_color(80, 80, 80)
+        self.set_text_color(*_MAROON)
         self.cell(0, 8, self._title_text, align="L")
-        self.cell(0, 8, datetime.now().strftime("%Y-%m-%d"), align="R", new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(0, 102, 204)
+        self.cell(0, 8, datetime.now().strftime("%Y-%m-%d"),
+                  align="R", new_x="LMARGIN", new_y="NEXT")
+        self.set_draw_color(*_MAROON)
         self.set_line_width(0.5)
         self.line(10, self.get_y(), self.w - 10, self.get_y())
         self.ln(4)
@@ -89,30 +108,30 @@ class _ReportPDF(FPDF):
     def footer(self):
         self.set_y(-15)
         self.set_font(self._body_font, "I", 8)
-        self.set_text_color(128, 128, 128)
+        self.set_text_color(*_GREY_MUTED)
         self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align="C")
 
     # -- helpers -------------------------------------------------------------
 
     def section_title(self, title: str):
         self.set_font(self._body_font, "B", 13)
-        self.set_text_color(0, 70, 140)
+        self.set_text_color(*_MAROON)
         self.ln(4)
         self.cell(0, 9, self._safe(title), new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(0, 70, 140)
+        self.set_draw_color(*_MAROON)
         self.set_line_width(0.3)
         self.line(10, self.get_y(), self.w - 10, self.get_y())
         self.ln(3)
 
     def body_text(self, text: str):
         self.set_font(self._body_font, "", 10)
-        self.set_text_color(30, 30, 30)
+        self.set_text_color(*_GREY_TEXT)
         self.multi_cell(0, 5, self._safe(text))
         self.ln(2)
 
     def metric_row(self, label: str, value: str):
         self.set_font(self._body_font, "B", 10)
-        self.set_text_color(50, 50, 50)
+        self.set_text_color(*_GREY_DARK)
         self.cell(70, 6, label)
         self.set_font(self._body_font, "", 10)
         self.cell(0, 6, value, new_x="LMARGIN", new_y="NEXT")
@@ -144,7 +163,7 @@ class _ReportPDF(FPDF):
             )
             needed = len(lines) * lh
             if needed <= avail:
-                self.set_text_color(30, 30, 30)
+                self.set_text_color(*_GREY_TEXT)
                 self.multi_cell(0, lh, self._safe(text))
                 self.ln(2)
                 return
@@ -158,11 +177,11 @@ class _ReportPDF(FPDF):
             0, lh, self._safe(text), dry_run=True, output="LINES"
         )
         truncated = lines[:max_lines]
-        self.set_text_color(30, 30, 30)
+        self.set_text_color(*_GREY_TEXT)
         for ln_text in truncated:
             self.cell(0, lh, ln_text, new_x="LMARGIN", new_y="NEXT")
         self.set_font(font_family, "I", sz)
-        self.set_text_color(128, 128, 128)
+        self.set_text_color(*_GREY_MUTED)
         self.cell(0, lh, "[... truncated to fit page]",
                   new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
@@ -204,17 +223,34 @@ def generate_report_pdf(
 
     # -- Cover / title page --------------------------------------------------
     pdf.add_page()
-    pdf.ln(30)
     font = pdf._body_font
+
+    # Logo centred on cover
+    if _LOGO_PATH.exists():
+        logo_h = 50
+        logo_x = (pdf.w - logo_h) / 2  # roughly square
+        pdf.ln(20)
+        pdf.image(str(_LOGO_PATH), x=logo_x, h=logo_h)
+        pdf.ln(10)
+    else:
+        pdf.ln(30)
+
     pdf.set_font(font, "B", 26)
-    pdf.set_text_color(0, 70, 140)
-    pdf.cell(0, 14, "Well Log Interpretation", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 14, "Report", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(*_MAROON)
+    pdf.cell(0, 14, "Well Log Interpretation", align="C",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 14, "Report", align="C",
+             new_x="LMARGIN", new_y="NEXT")
     pdf.ln(8)
     pdf.set_font(font, "", 12)
-    pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 8, f"Generated: {datetime.now().strftime('%B %d, %Y at %H:%M')}", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 8, f"Data points: {len(result_df)}  |  Curves: {len(result_df.columns)}", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(*_GREY_SUB)
+    pdf.cell(0, 8,
+             f"Generated: {datetime.now().strftime('%B %d, %Y at %H:%M')}",
+             align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8,
+             f"Data points: {len(result_df)}  |  "
+             f"Curves: {len(result_df.columns)}",
+             align="C", new_x="LMARGIN", new_y="NEXT")
 
     # -- Key Metrics ---------------------------------------------------------
     pdf.add_page()
@@ -222,7 +258,8 @@ def generate_report_pdf(
 
     avg_phi = result_df["PHIE"].mean() if "PHIE" in result_df.columns else 0
     avg_sw = result_df["SW"].mean() if "SW" in result_df.columns else 1
-    avg_vsh = result_df["VSHALE"].mean() if "VSHALE" in result_df.columns else 0.5
+    avg_vsh = (result_df["VSHALE"].mean()
+               if "VSHALE" in result_df.columns else 0.5)
 
     pdf.metric_row("Average Porosity:", f"{avg_phi:.1%}")
     pdf.metric_row("Average Water Saturation:", f"{avg_sw:.1%}")
