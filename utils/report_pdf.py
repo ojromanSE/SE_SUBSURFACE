@@ -194,6 +194,7 @@ def generate_report_pdf(
     result_df: pd.DataFrame,
     fig=None,
     ai_interpretation: str | None = None,
+    well_name: str = "",
 ) -> bytes:
     """Build a formal PDF report and return its bytes.
 
@@ -211,6 +212,8 @@ def generate_report_pdf(
         Log plot figure to embed.
     ai_interpretation : str, optional
         AI-generated interpretation text to include.
+    well_name : str, optional
+        Well name to display on the report.
 
     Returns
     -------
@@ -218,6 +221,8 @@ def generate_report_pdf(
         PDF file content.
     """
     pdf = _ReportPDF(orientation="P", unit="mm", format="A4")
+    if well_name:
+        pdf._title_text = f"{well_name} — Interpretation Report"
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.alias_nb_pages()
 
@@ -241,6 +246,11 @@ def generate_report_pdf(
              new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 14, "Report", align="C",
              new_x="LMARGIN", new_y="NEXT")
+    if well_name:
+        pdf.ln(6)
+        pdf.set_font(font, "B", 18)
+        pdf.cell(0, 12, pdf._safe(well_name), align="C",
+                 new_x="LMARGIN", new_y="NEXT")
     pdf.ln(8)
     pdf.set_font(font, "", 12)
     pdf.set_text_color(*_GREY_SUB)

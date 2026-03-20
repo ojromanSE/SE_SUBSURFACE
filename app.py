@@ -74,6 +74,14 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # Sidebar – File Upload
 # ---------------------------------------------------------------------------
+st.sidebar.header("Well Information")
+well_name = st.sidebar.text_input(
+    "Well Name",
+    value="",
+    placeholder="e.g. Smith #1H",
+    help="Enter a name to identify this well in the report.",
+)
+
 st.sidebar.header("Upload Log Files")
 uploaded_files = st.sidebar.file_uploader(
     "Upload one or more well log files",
@@ -472,14 +480,88 @@ st.success(
     f"{len(df)} data points, {len(df.columns)} curves detected"
 )
 
-# Auto-run interpretation
-result = auto_interpret(df, detected)
+# ---------------------------------------------------------------------------
+# Evaluation settings – Sw model, gross interval, well name
+# ---------------------------------------------------------------------------
+st.markdown("### Evaluation Settings")
+eval_col1, eval_col2 = st.columns(2)
+
+with eval_col1:
+    sw_model_label = st.selectbox(
+        "Water Saturation Model",
+        list(SW_METHODS.keys()),
+        help=(
+            "**Archie** — clean sands (default).  "
+            "**Simandoux** — shaly sands.  "
+            "**Indonesia** — empirical model for SE Asia / shaly formations."
+        ),
+    )
+    sw_model_key = SW_METHODS[sw_model_label]
+
+# Depth range for gross interval
+depth_col = "DEPTH"
+if depth_col in df.columns:
+    depth_min = float(df[depth_col].min())
+    depth_max = float(df[depth_col].max())
+else:
+    depth_min, depth_max = 0.0, float(len(df))
+
+with eval_col2:
+    interval_mode = st.radio(
+        "Gross interval selection",
+        ["Full well", "Set depth range"],
+        horizontal=True,
+        help="Evaluate the entire well or pick a specific depth interval.",
+    )
+
+if interval_mode == "Set depth range":
+    depth_input_col1, depth_input_col2 = st.columns(2)
+    with depth_input_col1:
+        eval_top = st.number_input(
+            "Top depth", value=depth_min,
+            min_value=depth_min, max_value=depth_max,
+            step=1.0, format="%.1f",
+        )
+    with depth_input_col2:
+        eval_bottom = st.number_input(
+            "Bottom depth", value=depth_max,
+            min_value=depth_min, max_value=depth_max,
+            step=1.0, format="%.1f",
+        )
+
+    # Visual slider as an alternative / quick adjustment
+    eval_top, eval_bottom = st.slider(
+        "Or drag to select interval",
+        min_value=depth_min,
+        max_value=depth_max,
+        value=(eval_top, eval_bottom),
+        step=0.5,
+        format="%.1f",
+    )
+
+    if eval_bottom <= eval_top:
+        st.error("Bottom depth must be greater than top depth.")
+        st.stop()
+
+    # Filter to selected gross interval
+    df = df[(df[depth_col] >= eval_top) & (df[depth_col] <= eval_bottom)].copy()
+    if df.empty:
+        st.error("No data in the selected interval.")
+        st.stop()
+    st.info(f"Evaluating interval **{eval_top:.1f} – {eval_bottom:.1f}** "
+            f"({len(df)} samples)")
+
+st.markdown("---")
+
+# Auto-run interpretation with selected Sw model
+result = auto_interpret(df, detected, sw_method=sw_model_key)
 net_stats = compute_net_pay_summary(result)
 
 # Store in session state
 st.session_state["result_df"] = result
 st.session_state["net_stats"] = net_stats
 st.session_state["detected"] = detected
+st.session_state["well_name"] = well_name
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -586,6 +668,7 @@ with tab_verbal:
     )
     import matplotlib.pyplot as plt
     ai_text = st.session_state.get("ai_interpretation")
+    _wn = st.session_state.get("well_name", "")
     pdf_bytes = generate_report_pdf(
         verbal=verbal,
         technical_report=technical_report,
@@ -593,12 +676,14 @@ with tab_verbal:
         result_df=result,
         fig=log_fig,
         ai_interpretation=ai_text,
+        well_name=_wn,
     )
     plt.close(log_fig)
+    _pdf_fname = f"{_wn.replace(' ', '_')}_report.pdf" if _wn else "well_interpretation_report.pdf"
     st.download_button(
         "Download Full Report (PDF)",
         pdf_bytes,
-        file_name="well_interpretation_report.pdf",
+        file_name=_pdf_fname,
         mime="application/pdf",
         type="primary",
     )
