@@ -462,24 +462,71 @@ def generate_interpretation_summary(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Resource-type presets (SPE-PRMS 2018 aligned)
+# ---------------------------------------------------------------------------
+RESOURCE_PRESETS = {
+    "conventional": {
+        "label": "Conventional",
+        "rho_matrix": 2.65,
+        "rho_fluid": 1.0,
+        "a": 1.0,
+        "m": 2.0,
+        "n": 2.0,
+        "rw": 0.05,
+        "rsh": 5.0,
+        "vsh_cutoff": 0.40,
+        "phi_cutoff": 0.08,
+        "sw_cutoff": 0.60,
+        "default_sw": "archie",
+        "description": (
+            "Standard clastic / carbonate reservoirs with intergranular "
+            "porosity. Archie parameters per Archie (1942); net-pay cutoffs "
+            "per Worthington SPE 131529."
+        ),
+    },
+    "unconventional": {
+        "label": "Unconventional",
+        "rho_matrix": 2.55,
+        "rho_fluid": 1.0,
+        "a": 1.0,
+        "m": 1.7,
+        "n": 1.8,
+        "rw": 0.03,
+        "rsh": 8.0,
+        "vsh_cutoff": 0.55,
+        "phi_cutoff": 0.04,
+        "sw_cutoff": 0.45,
+        "default_sw": "simandoux",
+        "description": (
+            "Tight / shale reservoirs (e.g. Wolfcamp, Eagle Ford, Bakken, "
+            "Marcellus). Lower cementation exponent m ~ 1.7 reflects "
+            "micro-/nano-porosity and natural fractures (Aguilera, 1976; "
+            "Glover, 2000). Matrix density lowered to 2.55 g/cc to account "
+            "for kerogen (Passey et al., 1990). Simandoux Sw model accounts "
+            "for clay conductivity. Net-pay cutoffs relaxed per SPE 170830."
+        ),
+    },
+}
+
+
 def auto_interpret(df: pd.DataFrame, detected: dict,
-                   sw_method: str = "archie") -> pd.DataFrame:
+                   sw_method: str = "archie",
+                   resource_type: str = "conventional") -> pd.DataFrame:
     """
     Fully automatic petrophysical interpretation using sensible defaults.
-    No user input required – designed for non-specialists.
-
-    Applies:
-      - Vshale from GR (Larionov Tertiary) with P5/P95 endpoints
-      - Density porosity (sandstone matrix default 2.65 g/cc)
-      - Neutron-density crossplot porosity if both available
-      - Sw with selected method (a=1, m=2, n=2, Rw=0.05)
-      - Net pay with moderate cutoffs (Vsh<0.40, Phi>0.08, Sw<0.60)
+    No user input required -- designed for non-specialists.
 
     Parameters
     ----------
     sw_method : str
         One of "archie", "simandoux", "indonesia".
+    resource_type : str
+        One of "conventional", "unconventional".  Selects Archie parameters,
+        matrix density, and net-pay cutoffs appropriate for the play type.
+        Follows SPE-PRMS (2018) resource classification guidelines.
     """
+    preset = RESOURCE_PRESETS.get(resource_type, RESOURCE_PRESETS["conventional"])
     result = df.copy()
 
     # --- Vshale ---
@@ -496,13 +543,15 @@ def auto_interpret(df: pd.DataFrame, detected: dict,
     has_density = "DENSITY" in detected
     has_neutron = "NEUTRON" in detected
     has_sonic = "SONIC" in detected
+    rho_ma = preset["rho_matrix"]
+    rho_fl = preset["rho_fluid"]
 
     if has_density and has_neutron:
-        phid = porosity_density(result[detected["DENSITY"]], 2.65, 1.0)
+        phid = porosity_density(result[detected["DENSITY"]], rho_ma, rho_fl)
         phin = result[detected["NEUTRON"]]
         result["PHIT"] = porosity_neutron_density(phin, phid)
     elif has_density:
-        result["PHIT"] = porosity_density(result[detected["DENSITY"]], 2.65, 1.0)
+        result["PHIT"] = porosity_density(result[detected["DENSITY"]], rho_ma, rho_fl)
     elif has_sonic:
         result["PHIT"] = porosity_sonic(result[detected["SONIC"]], 55.5, 189.0)
     else:
@@ -511,25 +560,34 @@ def auto_interpret(df: pd.DataFrame, detected: dict,
     result["PHIE"] = effective_porosity(result["PHIT"], result["VSHALE"])
 
     # --- Water Saturation ---
+    a = preset["a"]
+    m = preset["m"]
+    n = preset["n"]
+    rw = preset["rw"]
+    rsh = preset["rsh"]
+
     if "RESISTIVITY_DEEP" in detected:
         rt = result[detected["RESISTIVITY_DEEP"]]
         if sw_method == "simandoux":
             result["SW"] = sw_simandoux(
                 rt, result["PHIE"], result["VSHALE"],
-                rw=0.05, rsh=5.0, a=1.0, m=2.0, n=2.0,
+                rw=rw, rsh=rsh, a=a, m=m, n=n,
             )
         elif sw_method == "indonesia":
             result["SW"] = sw_indonesia(
                 rt, result["PHIE"], result["VSHALE"],
-                rw=0.05, rsh=5.0, a=1.0, m=2.0, n=2.0,
+                rw=rw, rsh=rsh, a=a, m=m, n=n,
             )
         else:
-            result["SW"] = sw_archie(rt, result["PHIE"], rw=0.05, a=1.0, m=2.0, n=2.0)
+            result["SW"] = sw_archie(rt, result["PHIE"], rw=rw, a=a, m=m, n=n)
     else:
         result["SW"] = 0.50
 
-    # --- Net Pay (moderate cutoffs) ---
-    result = compute_net_pay(result, "VSHALE", "PHIE", "SW", 0.40, 0.08, 0.60)
+    # --- Net Pay (cutoffs from preset) ---
+    result = compute_net_pay(
+        result, "VSHALE", "PHIE", "SW",
+        preset["vsh_cutoff"], preset["phi_cutoff"], preset["sw_cutoff"],
+    )
 
     return result
 

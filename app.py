@@ -36,6 +36,7 @@ from utils.petrophysics import (
     ogip_volumetric,
     VSHALE_METHODS,
     SW_METHODS,
+    RESOURCE_PRESETS,
     vshale_linear,
     porosity_density,
     porosity_sonic,
@@ -481,18 +482,43 @@ st.success(
 )
 
 # ---------------------------------------------------------------------------
-# Evaluation settings – Sw model, gross interval, well name
+# Evaluation settings – resource type, Sw model, gross interval
 # ---------------------------------------------------------------------------
 st.markdown("### Evaluation Settings")
+
+# Resource type selector
+resource_type_label = st.radio(
+    "Resource Type",
+    ["Conventional", "Unconventional"],
+    horizontal=True,
+    help=(
+        "**Conventional** — standard clastic/carbonate reservoirs. "
+        "Uses Archie parameters (a=1, m=2, n=2), matrix density 2.65 g/cc.\n\n"
+        "**Unconventional** — tight/shale plays (Wolfcamp, Eagle Ford, Bakken, etc.). "
+        "Uses lower cementation exponent (m=1.7), reduced matrix density (2.55 g/cc) "
+        "for kerogen effect, Simandoux Sw model for clay conductivity, and relaxed "
+        "net-pay cutoffs per SPE 170830."
+    ),
+)
+resource_type_key = resource_type_label.lower()
+preset = RESOURCE_PRESETS[resource_type_key]
+
 eval_col1, eval_col2 = st.columns(2)
 
 with eval_col1:
+    # Default Sw model depends on resource type
+    sw_keys = list(SW_METHODS.keys())
+    default_sw_idx = next(
+        (i for i, k in enumerate(SW_METHODS.values()) if k == preset["default_sw"]),
+        0,
+    )
     sw_model_label = st.selectbox(
         "Water Saturation Model",
-        list(SW_METHODS.keys()),
+        sw_keys,
+        index=default_sw_idx,
         help=(
-            "**Archie** — clean sands (default).  "
-            "**Simandoux** — shaly sands.  "
+            "**Archie** — clean sands.  "
+            "**Simandoux** — shaly sands (recommended for unconventional).  "
             "**Indonesia** — empirical model for SE Asia / shaly formations."
         ),
     )
@@ -553,8 +579,24 @@ if interval_mode == "Set depth range":
 
 st.markdown("---")
 
-# Auto-run interpretation with selected Sw model
-result = auto_interpret(df, detected, sw_method=sw_model_key)
+# Show active preset parameters
+with st.expander("Active parameters for this evaluation", expanded=False):
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        st.markdown(f"**Matrix density:** {preset['rho_matrix']} g/cc")
+        st.markdown(f"**Rw:** {preset['rw']} ohm-m")
+    with pc2:
+        st.markdown(f"**a:** {preset['a']}  |  **m:** {preset['m']}  |  **n:** {preset['n']}")
+        st.markdown(f"**Rsh:** {preset['rsh']} ohm-m")
+    with pc3:
+        st.markdown(f"**Vsh cutoff:** {preset['vsh_cutoff']}")
+        st.markdown(f"**Phi cutoff:** {preset['phi_cutoff']}")
+        st.markdown(f"**Sw cutoff:** {preset['sw_cutoff']}")
+    st.caption(preset["description"])
+
+# Auto-run interpretation with selected Sw model and resource type
+result = auto_interpret(df, detected, sw_method=sw_model_key,
+                        resource_type=resource_type_key)
 net_stats = compute_net_pay_summary(result)
 
 # Store in session state
@@ -562,6 +604,8 @@ st.session_state["result_df"] = result
 st.session_state["net_stats"] = net_stats
 st.session_state["detected"] = detected
 st.session_state["well_name"] = well_name
+st.session_state["resource_type"] = resource_type_key
+st.session_state["sw_model"] = sw_model_label
 
 # ---------------------------------------------------------------------------
 # Tabs
