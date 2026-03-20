@@ -10,12 +10,28 @@ Uses fpdf2 to build a formal, multi-section PDF that combines:
 """
 
 import io
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 from fpdf import FPDF
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove common markdown formatting symbols from text.
+
+    Converts markdown headers, bold, italic, and bullet markers to
+    plain text so the PDF renders cleanly.
+    """
+    # Remove header markers (### Header -> Header)
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+    # Remove bold/italic markers (**text** or *text* or ***text***)
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
+    # Remove underline-style bold (__text__)
+    text = re.sub(r'_{1,2}([^_]+)_{1,2}', r'\1', text)
+    return text
 
 
 # Brand colours (maroon / burgundy)
@@ -296,7 +312,8 @@ def generate_report_pdf(
     if ai_interpretation:
         pdf.add_page()
         pdf.section_title("AI-Enhanced Interpretation")
-        pdf.body_text_fit_page(ai_interpretation, max_size=10, min_size=6)
+        clean_ai = _strip_markdown(ai_interpretation)
+        pdf.body_text_fit_page(clean_ai, max_size=10, min_size=6)
 
     # -- Technical Report ----------------------------------------------------
     pdf.add_page()

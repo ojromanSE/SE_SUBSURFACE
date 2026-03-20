@@ -34,9 +34,19 @@ def _build_metrics_summary(
     df: pd.DataFrame,
     net_stats: dict,
     detected: dict,
+    well_name: str = "",
+    sw_model: str = "",
+    resource_type: str = "",
 ) -> str:
     """Build a concise text summary of all computed petrophysical metrics."""
     lines = []
+
+    if well_name:
+        lines.append(f"Well name: {well_name}")
+    if resource_type:
+        lines.append(f"Resource type: {resource_type}")
+    if sw_model:
+        lines.append(f"Sw model used: {sw_model}")
 
     # Depth range
     if "DEPTH" in df.columns:
@@ -145,95 +155,70 @@ teams to make drilling and booking decisions.
 
 You will receive computed petrophysical metrics from a well log \
 (Vshale, porosity, water saturation, net pay statistics, and available \
-curve information). These were computed using standard industry methods:
-- Vshale: Larionov Tertiary correction from Gamma Ray
-- Porosity: Density porosity (sandstone matrix 2.65 g/cc) or \
-neutron-density crossplot
-- Water saturation: Archie equation (a=1, m=2, n=2, Rw=0.05 ohm-m)
-- Net pay cutoffs: Vsh<0.40, Phi>0.08, Sw<0.60
+curve information). These were computed using standard industry methods \
+(details will be provided with the metrics).
 
 Your job is to produce a comprehensive interpretation report that supports \
 reserves evaluation and PUD/PROB location assessment. The report MUST \
 include ALL of the following sections with detailed analysis:
 
-## 1. EXECUTIVE SUMMARY
+1. EXECUTIVE SUMMARY
 Provide a 3-5 sentence overview of the well's reservoir quality, \
 hydrocarbon potential, and overall assessment for development drilling. \
 State whether this location supports PUD (Proved Undeveloped) or PROB \
 (Probable) reserves classification and why.
 
-## 2. RESERVOIR CHARACTERIZATION
-- Describe the reservoir interval(s) in detail: lithology, thickness, \
-continuity, and vertical heterogeneity.
-- Analyze the zonal breakdown (upper/middle/lower) and identify sweet \
-spots with best reservoir quality.
-- Discuss porosity distribution and what it implies about reservoir \
-quality (excellent >20%, good 15-20%, moderate 10-15%, poor <10%).
-- Evaluate shale content and its distribution pattern (laminated, \
-dispersed, or structural) and impact on flow capacity.
+2. RESERVOIR CHARACTERIZATION
+Describe the reservoir interval(s) in detail: lithology, thickness, \
+continuity, and vertical heterogeneity. Analyze the zonal breakdown \
+(upper/middle/lower) and identify sweet spots with best reservoir quality. \
+Discuss porosity distribution and shale content impact on flow capacity.
 
-## 3. HYDROCARBON SATURATION ANALYSIS
-- Interpret water saturation values and their vertical profile.
-- Identify the likely fluid type (oil, gas, or mixed) from available \
-indicators (neutron-density crossover, Sw profile, resistivity behavior).
-- Discuss the hydrocarbon column height and potential fluid contacts.
-- Evaluate transition zone characteristics if applicable.
+3. HYDROCARBON SATURATION ANALYSIS
+Interpret water saturation values and their vertical profile. \
+Identify the likely fluid type (oil, gas, or mixed) from available \
+indicators. Discuss the hydrocarbon column height and potential fluid contacts.
 
-## 4. NET PAY & FLOW CAPACITY ASSESSMENT
-- Analyze net pay thickness and net-to-gross ratio in the context of \
-development economics.
-- Estimate flow quality: is the pay continuous or interbedded?
-- Discuss expected permeability ranges based on porosity (use \
-Timur/Coates-type reasoning).
-- Assess whether the net pay is sufficient to justify development drilling.
+4. NET PAY & FLOW CAPACITY ASSESSMENT
+Analyze net pay thickness and net-to-gross ratio in the context of \
+development economics. Discuss expected permeability ranges based on \
+porosity (use Timur/Coates-type reasoning). Assess whether the net pay \
+is sufficient to justify development drilling.
 
-## 5. RESERVES CLASSIFICATION ASSESSMENT
-This is the most critical section. Based on SEC/PRMS guidelines:
-- **PUD Potential**: State whether this location qualifies as Proved \
-Undeveloped. PUD requires reasonable certainty that the reservoir is \
-productive based on offsetting production, reliable technology, or \
-pressure data. Discuss what evidence supports or weakens PUD classification.
-- **PROB Potential**: If PUD is not supported, assess Probable reserves. \
-Discuss the additional uncertainty factors.
-- **Key Risks to Booking**: Identify specific technical risks (reservoir \
-continuity, fluid contact uncertainty, completion risk, porosity cutoff \
-sensitivity, Sw model assumptions).
-- **Analog Comparison**: If geological context is provided, compare to \
-typical values for the formation/basin and discuss what that implies.
+5. RESERVES CLASSIFICATION ASSESSMENT
+This is the most critical section. Based on SEC/PRMS guidelines, assess \
+PUD and PROB potential, identify key risks to booking (reservoir continuity, \
+fluid contact uncertainty, completion risk, Sw model assumptions). \
+If geological context is provided, compare to typical values for the \
+formation/basin.
 
-## 6. SENSITIVITY & UNCERTAINTY ANALYSIS
-- Discuss the impact of Archie parameter assumptions (a, m, n, Rw). \
-What happens if Rw is 2x higher or lower?
-- Evaluate the sensitivity of net pay to cutoff values. Would a stricter \
-or looser Sw cutoff significantly change the reserves estimate?
-- Identify the single largest uncertainty affecting the reserves estimate.
-- Are the default matrix density (2.65) and fluid density assumptions valid?
+6. SENSITIVITY & UNCERTAINTY ANALYSIS
+Discuss the impact of Archie/Sw model parameter assumptions. \
+Evaluate the sensitivity of net pay to cutoff values. \
+Identify the single largest uncertainty affecting the reserves estimate.
 
-## 7. RECOMMENDATIONS FOR FURTHER EVALUATION
-Provide specific, actionable recommendations:
-- What additional data is needed? (core analysis, pressure data, PVT, \
-production tests, seismic attributes)
-- Should an alternative Sw model be used? (Simandoux, Indonesia, Waxman-Smits)
-- What completions considerations apply? (perforation intervals, \
-stimulation needs, artificial lift)
-- Are there additional wells or analogs that should be reviewed?
-- What would upgrade PROB to PUD, or PUD to PDP?
+7. RECOMMENDATIONS FOR FURTHER EVALUATION
+Provide specific, actionable recommendations: additional data needed, \
+alternative Sw models, completion considerations, analog reviews.
 
-## 8. DEVELOPMENT CONSIDERATIONS
-- Discuss optimal completion interval recommendations based on the log.
-- Identify potential production risks (water coning, shale barriers, \
-depletion from offsets).
-- Suggest monitoring/surveillance needs post-completion.
+8. DEVELOPMENT CONSIDERATIONS
+Discuss optimal completion interval recommendations, potential production \
+risks, and monitoring needs post-completion.
 
 FORMAT REQUIREMENTS:
-- Use markdown headers (##) for each section.
+- This report will be rendered in a PDF. Do NOT use any markdown formatting.
+- No #, ##, ###, **, *, or other markdown symbols anywhere.
+- Use UPPERCASE section headers followed by a newline, e.g.:
+  1. EXECUTIVE SUMMARY
+  (text here)
+- Use plain text only. For emphasis, use UPPERCASE words sparingly.
 - Keep the total report around 400-500 words. Be concise but substantive.
-- Combine or condense sections where appropriate to stay within the word limit.
-- Use technical terms appropriately but explain complex concepts.
 - Include specific numbers from the metrics to support your conclusions.
 - Be honest about limitations and uncertainties.
 - If geological context is provided, weave it throughout the analysis.
 - Do NOT pad with generic filler - every sentence should add value.
+- IMPORTANT: Use the actual well name provided. Never use "Well X" or \
+any placeholder name.
 - Write in a professional tone suitable for inclusion in a formal \
 reserves report or AFE justification.\
 """
@@ -249,6 +234,9 @@ def generate_gemini_interpretation(
     detected: dict,
     api_key: str,
     geological_context: str = "",
+    well_name: str = "",
+    sw_model: str = "",
+    resource_type: str = "",
 ) -> str:
     """Generate AI interpretation using Google Gemini."""
     if not HAS_GEMINI:
@@ -257,7 +245,10 @@ def generate_gemini_interpretation(
             "Run: pip install google-genai"
         )
 
-    metrics = _build_metrics_summary(df, net_stats, detected)
+    metrics = _build_metrics_summary(df, net_stats, detected,
+                                     well_name=well_name,
+                                     sw_model=sw_model,
+                                     resource_type=resource_type)
 
     user_message = f"Here are the computed petrophysical metrics for this well:\n\n{metrics}"
     if geological_context.strip():
@@ -289,6 +280,9 @@ def generate_claude_interpretation(
     detected: dict,
     api_key: str,
     geological_context: str = "",
+    well_name: str = "",
+    sw_model: str = "",
+    resource_type: str = "",
 ) -> str:
     """Generate AI interpretation using Claude."""
     if not HAS_ANTHROPIC:
@@ -297,7 +291,10 @@ def generate_claude_interpretation(
             "Run: pip install anthropic"
         )
 
-    metrics = _build_metrics_summary(df, net_stats, detected)
+    metrics = _build_metrics_summary(df, net_stats, detected,
+                                     well_name=well_name,
+                                     sw_model=sw_model,
+                                     resource_type=resource_type)
 
     user_message = f"Here are the computed petrophysical metrics for this well:\n\n{metrics}"
     if geological_context.strip():
@@ -343,6 +340,9 @@ def generate_ai_interpretation(
     api_key: str,
     provider: str = "Gemini (Free)",
     geological_context: str = "",
+    well_name: str = "",
+    sw_model: str = "",
+    resource_type: str = "",
 ) -> str:
     """
     Generate an AI-enhanced interpretation using the selected provider.
@@ -361,6 +361,12 @@ def generate_ai_interpretation(
         One of the keys in PROVIDERS dict.
     geological_context : str, optional
         User-provided context (basin, formation, fluid type, etc.).
+    well_name : str, optional
+        Well name to use in the report.
+    sw_model : str, optional
+        Sw model label used for this evaluation.
+    resource_type : str, optional
+        Resource type (conventional / unconventional).
 
     Returns
     -------
@@ -375,7 +381,10 @@ def generate_ai_interpretation(
         pkg = "google-genai" if "Gemini" in provider else "anthropic"
         return f"Required package not installed. Run: pip install {pkg}"
 
-    return prov["func"](df, net_stats, detected, api_key, geological_context)
+    return prov["func"](
+        df, net_stats, detected, api_key, geological_context,
+        well_name=well_name, sw_model=sw_model, resource_type=resource_type,
+    )
 
 
 def get_available_providers() -> list:
