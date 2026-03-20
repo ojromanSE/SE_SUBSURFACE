@@ -462,7 +462,8 @@ def generate_interpretation_summary(
     return "\n".join(lines)
 
 
-def auto_interpret(df: pd.DataFrame, detected: dict) -> pd.DataFrame:
+def auto_interpret(df: pd.DataFrame, detected: dict,
+                   sw_method: str = "archie") -> pd.DataFrame:
     """
     Fully automatic petrophysical interpretation using sensible defaults.
     No user input required – designed for non-specialists.
@@ -471,8 +472,13 @@ def auto_interpret(df: pd.DataFrame, detected: dict) -> pd.DataFrame:
       - Vshale from GR (Larionov Tertiary) with P5/P95 endpoints
       - Density porosity (sandstone matrix default 2.65 g/cc)
       - Neutron-density crossplot porosity if both available
-      - Archie Sw with standard parameters (a=1, m=2, n=2, Rw=0.05)
+      - Sw with selected method (a=1, m=2, n=2, Rw=0.05)
       - Net pay with moderate cutoffs (Vsh<0.40, Phi>0.08, Sw<0.60)
+
+    Parameters
+    ----------
+    sw_method : str
+        One of "archie", "simandoux", "indonesia".
     """
     result = df.copy()
 
@@ -507,7 +513,18 @@ def auto_interpret(df: pd.DataFrame, detected: dict) -> pd.DataFrame:
     # --- Water Saturation ---
     if "RESISTIVITY_DEEP" in detected:
         rt = result[detected["RESISTIVITY_DEEP"]]
-        result["SW"] = sw_archie(rt, result["PHIE"], rw=0.05, a=1.0, m=2.0, n=2.0)
+        if sw_method == "simandoux":
+            result["SW"] = sw_simandoux(
+                rt, result["PHIE"], result["VSHALE"],
+                rw=0.05, rsh=5.0, a=1.0, m=2.0, n=2.0,
+            )
+        elif sw_method == "indonesia":
+            result["SW"] = sw_indonesia(
+                rt, result["PHIE"], result["VSHALE"],
+                rw=0.05, rsh=5.0, a=1.0, m=2.0, n=2.0,
+            )
+        else:
+            result["SW"] = sw_archie(rt, result["PHIE"], rw=0.05, a=1.0, m=2.0, n=2.0)
     else:
         result["SW"] = 0.50
 
