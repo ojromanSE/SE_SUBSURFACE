@@ -691,6 +691,9 @@ with tab_verbal:
                         api_key=api_key,
                         provider=provider,
                         geological_context=geo_context,
+                        well_name=st.session_state.get("well_name", ""),
+                        sw_model=st.session_state.get("sw_model", ""),
+                        resource_type=st.session_state.get("resource_type", ""),
                     )
                     st.session_state["ai_interpretation"] = ai_text
                 except Exception as e:
