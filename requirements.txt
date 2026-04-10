@@ -2,6 +2,7 @@ streamlit>=1.30.0
 lasio>=0.31
 pandas>=2.0.0
 numpy>=1.24.0
+scipy>=1.11.0
 matplotlib>=3.7.0
 pdfplumber>=0.10.0
 plotly>=5.18.0

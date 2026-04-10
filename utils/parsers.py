@@ -1,6 +1,9 @@
 """
 Parsers for well log files: LAS, CSV/Excel, and PDF extraction.
 Supports both text-based and raster (scanned image) PDFs.
+
+Also extracts well header metadata (lat/long, well name, field, etc.)
+from LAS file headers and provides unit detection/conversion utilities.
 """
 
 import io
@@ -10,6 +13,221 @@ import pandas as pd
 import numpy as np
 import pdfplumber
 from PIL import Image
+
+
+# ---------------------------------------------------------------------------
+# Unit detection & conversion
+# ---------------------------------------------------------------------------
+
+# Depth unit patterns
+_DEPTH_UNIT_MAP = {
+    "F": "ft", "FT": "ft", "FEET": "ft", "FOOT": "ft", "FT.": "ft",
+    "M": "m", "MT": "m", "METER": "m", "METERS": "m", "METRE": "m",
+    "METRES": "m", "M.": "m",
+}
+
+# Curve unit hints – maps raw unit strings to canonical form
+_UNIT_CANONICAL = {
+    # Porosity
+    "V/V": "v/v", "FRAC": "v/v", "FRACTION": "v/v", "DEC": "v/v",
+    "%": "pct", "PU": "pct", "P.U.": "pct", "PCT": "pct", "PERCENT": "pct",
+    # Resistivity
+    "OHMM": "ohmm", "OHM.M": "ohmm", "OHM-M": "ohmm", "OHMM2/M": "ohmm",
+    "OHM.M2/M": "ohmm", "OHMS": "ohmm",
+    # Density
+    "G/C3": "g/cc", "G/CC": "g/cc", "GM/CC": "g/cc", "KG/M3": "kg/m3",
+    "G/CM3": "g/cc",
+    # Sonic
+    "US/F": "us/ft", "US/FT": "us/ft", "USEC/FT": "us/ft",
+    "US/M": "us/m", "USEC/M": "us/m",
+    # GR
+    "GAPI": "gapi", "API": "gapi",
+    # Caliper
+    "IN": "in", "INCH": "in", "INCHES": "in",
+    "CM": "cm", "MM": "mm",
+}
+
+
+def detect_depth_unit(las_or_unit_str) -> str:
+    """Return 'ft' or 'm' from a lasio LASFile or raw unit string."""
+    if hasattr(las_or_unit_str, "well"):
+        # lasio object – check STRT/STOP/STEP units
+        for item in las_or_unit_str.well:
+            if item.mnemonic.upper() in ("STRT", "STOP", "STEP"):
+                u = str(item.unit).strip().upper()
+                if u in _DEPTH_UNIT_MAP:
+                    return _DEPTH_UNIT_MAP[u]
+        return "ft"  # default
+    u = str(las_or_unit_str).strip().upper()
+    return _DEPTH_UNIT_MAP.get(u, "ft")
+
+
+def detect_curve_units(las) -> dict:
+    """
+    Return a dict mapping curve mnemonic -> canonical unit string
+    from a lasio LASFile object.
+    """
+    units = {}
+    for curve in las.curves:
+        raw = str(curve.unit).strip().upper()
+        units[curve.mnemonic] = _UNIT_CANONICAL.get(raw, raw.lower())
+    return units
+
+
+def convert_depth(df: pd.DataFrame, from_unit: str, to_unit: str,
+                  depth_col: str = "DEPTH") -> pd.DataFrame:
+    """Convert the DEPTH column between ft and m in-place."""
+    if from_unit == to_unit or depth_col not in df.columns:
+        return df
+    if from_unit == "m" and to_unit == "ft":
+        df[depth_col] = df[depth_col] * 3.28084
+    elif from_unit == "ft" and to_unit == "m":
+        df[depth_col] = df[depth_col] / 3.28084
+    return df
+
+
+def normalize_porosity_units(df: pd.DataFrame, curve_units: dict) -> pd.DataFrame:
+    """Convert porosity columns from % to v/v if detected as percentage."""
+    porosity_mnemonics = {"NPHI", "TNPH", "DPHI", "PHIN", "NPOR", "PHI", "PHIT", "PHIE"}
+    for col in df.columns:
+        if col.upper() in porosity_mnemonics:
+            unit = curve_units.get(col, "")
+            if unit == "pct":
+                # Values > 1 strongly suggest percentage
+                if df[col].dropna().max() > 1.0:
+                    df[col] = df[col] / 100.0
+    return df
+
+
+def normalize_density_units(df: pd.DataFrame, curve_units: dict) -> pd.DataFrame:
+    """Convert density from kg/m3 to g/cc if needed."""
+    density_mnemonics = {"RHOB", "RHOZ", "DEN", "DENSITY", "ZDEN"}
+    for col in df.columns:
+        if col.upper() in density_mnemonics:
+            unit = curve_units.get(col, "")
+            if unit == "kg/m3" or (df[col].dropna().median() > 100):
+                df[col] = df[col] / 1000.0
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Lat/Long extraction from LAS headers
+# ---------------------------------------------------------------------------
+
+def _parse_dms_to_decimal(dms_str: str) -> float | None:
+    """
+    Parse a lat/long string in various formats to decimal degrees.
+
+    Handles:
+      - Decimal: "29.123456", "-95.456"
+      - DMS: "29 07 23.45 N", "29d 07' 23.45\" N"
+      - Compact DMS: "29:07:23.45N"
+      - Degrees + decimal minutes: "29 07.391N"
+    """
+    if not dms_str or not dms_str.strip():
+        return None
+    s = dms_str.strip()
+
+    # Determine hemisphere sign
+    sign = 1
+    if s[-1].upper() in ("S", "W"):
+        sign = -1
+        s = s[:-1].strip()
+    elif s[-1].upper() in ("N", "E"):
+        s = s[:-1].strip()
+    elif s[0] == "-":
+        sign = -1
+        s = s[1:].strip()
+
+    # Try plain decimal first
+    try:
+        return sign * float(s)
+    except ValueError:
+        pass
+
+    # Split on delimiters: space, :, d, °, ', "
+    parts = re.split(r"[:\s°d'\"]+", s)
+    parts = [p for p in parts if p]
+
+    try:
+        if len(parts) == 1:
+            return sign * float(parts[0])
+        elif len(parts) == 2:
+            # Degrees + decimal minutes
+            deg = float(parts[0])
+            mins = float(parts[1])
+            return sign * (deg + mins / 60.0)
+        elif len(parts) >= 3:
+            deg = float(parts[0])
+            mins = float(parts[1])
+            secs = float(parts[2])
+            return sign * (deg + mins / 60.0 + secs / 3600.0)
+    except (ValueError, IndexError):
+        pass
+
+    return None
+
+
+def extract_las_metadata(file_bytes: bytes) -> dict:
+    """
+    Extract well header metadata from a LAS file.
+
+    Returns a dict with keys:
+      - well_name: str
+      - field: str
+      - company: str
+      - county: str
+      - state: str
+      - country: str
+      - latitude: float or None
+      - longitude: float or None
+      - lat_raw: str (original string)
+      - lon_raw: str (original string)
+      - api_number: str
+      - depth_unit: str ('ft' or 'm')
+      - curve_units: dict mapping mnemonic -> unit
+      - date: str
+      - service_company: str
+      - uwi: str
+    """
+    text = file_bytes.decode("utf-8", errors="replace")
+    las = lasio.read(io.StringIO(text), engine="normal")
+
+    meta = {
+        "well_name": "", "field": "", "company": "", "county": "",
+        "state": "", "country": "", "latitude": None, "longitude": None,
+        "lat_raw": "", "lon_raw": "", "api_number": "", "depth_unit": "ft",
+        "curve_units": {}, "date": "", "service_company": "", "uwi": "",
+        "location": "",
+    }
+
+    # Map of LAS well-section mnemonics to our metadata keys
+    _WELL_FIELD_MAP = {
+        "WELL": "well_name", "COMP": "company", "FLD": "field",
+        "CNTY": "county", "STAT": "state", "CTRY": "country",
+        "LOC": "location", "SRVC": "service_company",
+        "DATE": "date", "API": "api_number", "UWI": "uwi",
+    }
+    _LAT_MNEMONICS = {"LATI", "LAT", "SLAT", "LATITUDE", "YLOC", "SURF_LAT"}
+    _LON_MNEMONICS = {"LONG", "LON", "SLON", "LONGITUDE", "XLON", "XLOC", "SURF_LONG"}
+
+    for item in las.well:
+        mnem = item.mnemonic.strip().upper()
+        val = str(item.value).strip() if item.value else ""
+
+        if mnem in _WELL_FIELD_MAP and val:
+            meta[_WELL_FIELD_MAP[mnem]] = val
+        elif mnem in _LAT_MNEMONICS and val:
+            meta["lat_raw"] = val
+            meta["latitude"] = _parse_dms_to_decimal(val)
+        elif mnem in _LON_MNEMONICS and val:
+            meta["lon_raw"] = val
+            meta["longitude"] = _parse_dms_to_decimal(val)
+
+    meta["depth_unit"] = detect_depth_unit(las)
+    meta["curve_units"] = detect_curve_units(las)
+
+    return meta
 
 
 def merge_log_dataframes(dfs: list, depth_col: str = "DEPTH") -> pd.DataFrame:
@@ -77,14 +295,21 @@ def merge_log_dataframes(dfs: list, depth_col: str = "DEPTH") -> pd.DataFrame:
     return merged
 
 
-def parse_las(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Parse a LAS file and return a DataFrame with depth as the index."""
+def parse_las(file_bytes: bytes, filename: str) -> tuple[pd.DataFrame, dict]:
+    """
+    Parse a LAS file and return (DataFrame, metadata_dict).
+
+    The DataFrame has DEPTH as first column.
+    The metadata dict contains well header info (lat/long, name, units, etc.).
+    """
     text = file_bytes.decode("utf-8", errors="replace")
     las = lasio.read(io.StringIO(text), engine="normal")
     df = las.df().reset_index()
+
     # Normalize the depth column name
     depth_col = df.columns[0]
     df = df.rename(columns={depth_col: "DEPTH"})
+
     # Deduplicate column names to prevent downstream errors
     if df.columns.duplicated().any():
         cols = list(df.columns)
@@ -96,28 +321,68 @@ def parse_las(file_bytes: bytes, filename: str) -> pd.DataFrame:
             else:
                 seen[c] = 0
         df.columns = cols
-    return df
+
+    # Extract metadata (lat/long, well name, units, etc.)
+    meta = extract_las_metadata(file_bytes)
+
+    # Apply unit normalizations
+    curve_units = meta.get("curve_units", {})
+    df = normalize_porosity_units(df, curve_units)
+    df = normalize_density_units(df, curve_units)
+
+    return df, meta
 
 
-def parse_csv_excel(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Parse a CSV or Excel file containing log data."""
+def parse_csv_excel(file_bytes: bytes, filename: str) -> tuple[pd.DataFrame, dict]:
+    """Parse a CSV or Excel file containing log data. Returns (DataFrame, metadata).
+
+    Handles DrillingInfo/Enverus export formats with verbose column names
+    like "Gamma Ray (API)" by stripping units in parentheses and mapping
+    to standard mnemonics.
+    """
     if filename.endswith((".xlsx", ".xls")):
         df = pd.read_excel(io.BytesIO(file_bytes))
     else:
         df = pd.read_csv(io.BytesIO(file_bytes))
 
+    # Clean column names: strip whitespace, normalize
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Map verbose DI/Enverus-style column names to standard mnemonics
+    _DI_COLUMN_MAP = {
+        "GAMMA RAY": "GR", "GAMMA_RAY": "GR",
+        "DEEP RESISTIVITY": "ILD", "DEEP RES": "ILD", "RES DEEP": "ILD",
+        "SHALLOW RESISTIVITY": "ILS", "SHALLOW RES": "ILS", "RES SHALLOW": "ILS",
+        "BULK DENSITY": "RHOB", "DENSITY": "RHOB",
+        "NEUTRON POROSITY": "NPHI", "NEUTRON": "NPHI",
+        "SONIC": "DT", "COMPRESSIONAL SONIC": "DT",
+        "CALIPER": "CALI",
+        "MEASURED DEPTH": "DEPTH",
+        "TRUE VERTICAL DEPTH": "TVD",
+    }
+
+    renamed = {}
+    for col in df.columns:
+        # Strip units in parentheses: "Gamma Ray (API)" -> "Gamma Ray"
+        clean = re.sub(r"\s*\([^)]*\)\s*$", "", col).strip().upper()
+        clean = re.sub(r"[_\s]+", " ", clean)
+        if clean in _DI_COLUMN_MAP:
+            renamed[col] = _DI_COLUMN_MAP[clean]
+    if renamed:
+        df = df.rename(columns=renamed)
+
     # Try to identify and rename the depth column
     for col in df.columns:
-        if col.upper() in ("DEPTH", "DEPT", "MD", "TVD", "MEASURED_DEPTH"):
+        if str(col).upper() in ("DEPTH", "DEPT", "MD", "TVD", "MEASURED_DEPTH"):
             df = df.rename(columns={col: "DEPTH"})
             break
 
-    return df
+    return df, {}
 
 
-def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
+def parse_pdf(file_bytes: bytes, filename: str) -> tuple[pd.DataFrame, dict]:
     """
-    Extract tabular data from a PDF well log.
+    Extract tabular data from a PDF well log. Returns (DataFrame, metadata).
     Attempts to find tables with numeric log data.
     Falls back to text extraction for structured data.
     """
@@ -158,12 +423,12 @@ def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
             if not all_rows:
                 header, all_rows = _extract_from_text(pdf)
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     if not all_rows:
         # No tabular data found – this is likely a raster/scanned PDF.
         # Return empty DataFrame; caller should use extract_pdf_images() instead.
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
 
     if header:
         # Ensure header and rows have same length
@@ -208,7 +473,7 @@ def parse_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if not depth_found:
         df.insert(0, "DEPTH", range(len(df)))
 
-    return df
+    return df, {}
 
 
 def _looks_like_header(row: list) -> bool:
@@ -294,24 +559,118 @@ def extract_pdf_images(file_bytes: bytes) -> list:
     return images
 
 
+def extract_pdf_header_metadata(file_bytes: bytes) -> dict:
+    """
+    Try to extract well metadata (lat/long, well name, API) from text
+    on the first page of a PDF log. Works for PDFs that have a text layer
+    in their header block (common for digitally-generated log prints).
+
+    Returns a dict similar to extract_las_metadata().
+    """
+    meta = {
+        "well_name": "", "field": "", "company": "", "county": "",
+        "state": "", "latitude": None, "longitude": None,
+        "lat_raw": "", "lon_raw": "", "api_number": "", "location": "",
+    }
+
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            if not pdf.pages:
+                return meta
+            # Only look at the first page header area (top 25%)
+            page = pdf.pages[0]
+            header_bbox = (0, 0, page.width, page.height * 0.25)
+            text = page.within_bbox(header_bbox).extract_text() or ""
+            if not text.strip():
+                # Try full first page
+                text = page.extract_text() or ""
+    except Exception:
+        return meta
+
+    if not text.strip():
+        return meta
+
+    lines = text.strip().split("\n")
+
+    # Patterns to look for in header text
+    _patterns = {
+        "well_name": [
+            r"(?:WELL|WELL\s*NAME)\s*[:=\-]\s*(.+)",
+        ],
+        "company": [
+            r"(?:COMP(?:ANY)?|OPERATOR)\s*[:=\-]\s*(.+)",
+        ],
+        "field": [
+            r"(?:FIELD|FLD)\s*[:=\-]\s*(.+)",
+        ],
+        "county": [
+            r"(?:COUNTY|CNTY)\s*[:=\-]\s*(.+)",
+        ],
+        "state": [
+            r"(?:STATE|STAT)\s*[:=\-]\s*(.+)",
+        ],
+        "api_number": [
+            r"(?:API\s*(?:NO|NUMBER|#)?)\s*[:=\-]?\s*([\d\-]+)",
+        ],
+    }
+
+    # Lat/long patterns
+    _lat_patterns = [
+        r"(?:LAT(?:ITUDE)?)\s*[:=\-]\s*([\d°\'\"\.\s\-NSEW:dms]+)",
+        r"(?:SURF(?:ACE)?\s*LAT)\s*[:=\-]\s*([\d°\'\"\.\s\-NSEW:dms]+)",
+    ]
+    _lon_patterns = [
+        r"(?:LON(?:G(?:ITUDE)?)?)\s*[:=\-]\s*([\d°\'\"\.\s\-NSEW:dms]+)",
+        r"(?:SURF(?:ACE)?\s*LON(?:G)?)\s*[:=\-]\s*([\d°\'\"\.\s\-NSEW:dms]+)",
+    ]
+
+    full_text = "\n".join(lines)
+
+    for key, patterns in _patterns.items():
+        for pat in patterns:
+            m = re.search(pat, full_text, re.IGNORECASE)
+            if m and m.group(1).strip():
+                meta[key] = m.group(1).strip()
+                break
+
+    for pat in _lat_patterns:
+        m = re.search(pat, full_text, re.IGNORECASE)
+        if m and m.group(1).strip():
+            meta["lat_raw"] = m.group(1).strip()
+            meta["latitude"] = _parse_dms_to_decimal(meta["lat_raw"])
+            break
+
+    for pat in _lon_patterns:
+        m = re.search(pat, full_text, re.IGNORECASE)
+        if m and m.group(1).strip():
+            meta["lon_raw"] = m.group(1).strip()
+            meta["longitude"] = _parse_dms_to_decimal(meta["lon_raw"])
+            break
+
+    return meta
+
+
 def detect_log_curves(df: pd.DataFrame) -> dict:
     """
     Detect which standard log curves are present in the DataFrame
     by matching column names to known mnemonics.
     Returns a dict mapping curve type to column name.
+
+    Supports standard LAS mnemonics, DrillingInfo/Enverus export names,
+    and common vendor variations.
     """
     curve_patterns = {
-        "GR": r"^(GR|GAMMA|GAMMA_RAY|SGR|CGR)$",
-        "DEPTH": r"^(DEPTH|DEPT|MD|TVD|MEASURED_DEPTH)$",
-        "RESISTIVITY_DEEP": r"^(ILD|RT|LLD|RLLD|RDEP|RD|AT90|RDEEP|RES_DEEP)$",
-        "RESISTIVITY_SHALLOW": r"^(ILS|RS|LLS|RLLS|RSHA|RSHAL|AT10|RES_SHALLOW)$",
-        "DENSITY": r"^(RHOB|RHOZ|DEN|DENSITY|ZDEN)$",
-        "NEUTRON": r"^(NPHI|TNPH|NEU|NEUTRON|PHIN|NPOR)$",
-        "SONIC": r"^(DT|DTC|DTCO|SONIC|AC)$",
-        "CALIPER": r"^(CALI|CAL|CALIPER|HCAL)$",
-        "SP": r"^(SP|SPONTANEOUS)$",
-        "PE": r"^(PE|PEF|PEFZ)$",
-        "DENSITY_CORRECTION": r"^(DRHO|DCOR)$",
+        "GR": r"^(GR|GAMMA|GAMMA_RAY|GAMMA\.RAY|SGR|CGR|GR_CORR|GRD|GRS)$",
+        "DEPTH": r"^(DEPTH|DEPT|MD|TVD|MEASURED_DEPTH|MEASURED\.DEPTH|TDEP)$",
+        "RESISTIVITY_DEEP": r"^(ILD|RT|LLD|RLLD|RDEP|RD|AT90|RDEEP|RES_DEEP|RESD|R_DEEP|HDRS|M2RX)$",
+        "RESISTIVITY_SHALLOW": r"^(ILS|RS|LLS|RLLS|RSHA|RSHAL|AT10|RES_SHALLOW|RESS|R_SHALL|HMRS|M2R1)$",
+        "DENSITY": r"^(RHOB|RHOZ|DEN|DENSITY|ZDEN|BULK_DENSITY|BULK\.DEN)$",
+        "NEUTRON": r"^(NPHI|TNPH|NEU|NEUTRON|PHIN|NPOR|NEUT|NEUTRON_POR)$",
+        "SONIC": r"^(DT|DTC|DTCO|SONIC|AC|DT_COMP|DTLN)$",
+        "CALIPER": r"^(CALI|CAL|CALIPER|HCAL|BS|BIT_SIZE)$",
+        "SP": r"^(SP|SPONTANEOUS|SPONT)$",
+        "PE": r"^(PE|PEF|PEFZ|PHOTO)$",
+        "DENSITY_CORRECTION": r"^(DRHO|DCOR|DENS_CORR)$",
     }
 
     detected = {}
