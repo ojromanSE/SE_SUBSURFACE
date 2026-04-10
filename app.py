@@ -18,8 +18,11 @@ from utils.parsers import (
     parse_csv_excel,
     parse_pdf,
     extract_pdf_images,
+    extract_pdf_header_metadata,
     detect_log_curves,
     merge_log_dataframes,
+    extract_las_metadata,
+    convert_depth,
 )
 from utils.digitizer import (
     suggest_tracks,
@@ -55,6 +58,11 @@ from utils.ai_interpretation import (
     PROVIDERS,
 )
 from utils.report_pdf import generate_report_pdf
+from utils.multiwell import (
+    detect_formation_boundaries,
+    plot_well_correlation,
+    plot_well_map,
+)
 
 # ---------------------------------------------------------------------------
 # Page Config
@@ -73,8 +81,19 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar – File Upload
+# Sidebar – Mode and File Upload
 # ---------------------------------------------------------------------------
+app_mode = st.sidebar.radio(
+    "Mode",
+    ["Single Well", "Multi-Well Correlation"],
+    horizontal=True,
+    help=(
+        "**Single Well** — Upload files for one well and get a full interpretation.\n\n"
+        "**Multi-Well Correlation** — Upload files for several wells from the same area. "
+        "Compare logs side by side and detect formation boundaries."
+    ),
+)
+
 st.sidebar.header("Well Information")
 well_name = st.sidebar.text_input(
     "Well Name",
@@ -88,7 +107,12 @@ uploaded_files = st.sidebar.file_uploader(
     "Upload one or more well log files",
     type=["las", "csv", "xlsx", "xls", "pdf"],
     accept_multiple_files=True,
-    help="Upload multiple files for the same well (e.g. separate LAS runs for different depth sections). They will be merged on DEPTH.",
+    help=(
+        "**Single Well mode:** Upload multiple files for the same well "
+        "(e.g. separate LAS runs) — they will be merged on DEPTH.\n\n"
+        "**Multi-Well mode:** Upload one LAS/CSV file per well. "
+        "Each file is treated as a separate well."
+    ),
 )
 
 if not uploaded_files:
@@ -142,13 +166,190 @@ if not uploaded_files:
         )
     st.stop()
 
-# ---------------------------------------------------------------------------
-# Parse the uploaded file(s)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# MULTI-WELL CORRELATION MODE
+# ===========================================================================
+if app_mode == "Multi-Well Correlation":
+    st.markdown("### Multi-Well Correlation")
+    st.markdown(
+        "Each uploaded file is treated as a **separate well**. "
+        "Upload one LAS or CSV file per well to compare them side by side."
+    )
+
+    multi_wells = []  # list of dicts: name, df, detected, meta, lat, lon
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.read()
+        fname = uploaded_file.name.lower()
+        try:
+            if fname.endswith(".las"):
+                wdf, wmeta = parse_las(file_bytes, fname)
+            elif fname.endswith((".csv", ".xlsx", ".xls")):
+                wdf, wmeta = parse_csv_excel(file_bytes, fname)
+            elif fname.endswith(".pdf"):
+                wdf, wmeta = parse_pdf(file_bytes, fname)
+                if wdf.empty:
+                    st.warning(f"Skipping **{uploaded_file.name}** — raster PDF (not supported in multi-well mode)")
+                    continue
+            else:
+                continue
+
+            wdetected = detect_log_curves(wdf)
+            wname = wmeta.get("well_name", "") or uploaded_file.name.rsplit(".", 1)[0]
+            multi_wells.append({
+                "name": wname,
+                "df": wdf,
+                "detected": wdetected,
+                "meta": wmeta,
+                "lat": wmeta.get("latitude"),
+                "lon": wmeta.get("longitude"),
+                "filename": uploaded_file.name,
+            })
+        except Exception as e:
+            st.warning(f"Error parsing **{uploaded_file.name}**: {e}")
+
+    if not multi_wells:
+        st.warning("No wells could be loaded. Upload LAS or CSV files.")
+        st.stop()
+
+    st.success(f"Loaded **{len(multi_wells)} wells**: "
+               + ", ".join(w["name"] for w in multi_wells))
+
+    # Store in session state for persistence
+    st.session_state["multi_wells"] = multi_wells
+
+    # --- Tabs ---
+    mw_tab_corr, mw_tab_map, mw_tab_formations, mw_tab_data = st.tabs([
+        "Log Correlation",
+        "Well Map",
+        "Formation Detection",
+        "Well Summary Table",
+    ])
+
+    # --- Tab: Log Correlation ---
+    with mw_tab_corr:
+        st.subheader("Well-to-Well Log Correlation")
+        corr_curve = st.selectbox(
+            "Correlation curve",
+            ["GR", "RESISTIVITY_DEEP", "DENSITY", "NEUTRON", "SONIC"],
+            help="Select which log curve to display across all wells.",
+        )
+        corr_fig = plot_well_correlation(multi_wells, curve=corr_curve)
+        st.pyplot(corr_fig)
+        import matplotlib.pyplot as plt
+        plt.close(corr_fig)
+
+    # --- Tab: Well Map ---
+    with mw_tab_map:
+        st.subheader("Well Location Map")
+        wells_with_loc = [w for w in multi_wells
+                          if w.get("lat") is not None and w.get("lon") is not None]
+        if wells_with_loc:
+            map_df = pd.DataFrame([
+                {"lat": w["lat"], "lon": w["lon"], "name": w["name"]}
+                for w in wells_with_loc
+            ])
+            st.map(map_df, zoom=9)
+            st.dataframe(
+                map_df.rename(columns={"lat": "Latitude", "lon": "Longitude", "name": "Well"}),
+                width="stretch",
+            )
+        else:
+            st.info(
+                "No well locations found in the uploaded files. "
+                "Lat/long is extracted from LAS file headers (LATI/LONG fields)."
+            )
+            # Allow manual entry
+            st.markdown("**Enter coordinates manually:**")
+            for i, w in enumerate(multi_wells):
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    st.text(w["name"])
+                with c2:
+                    lat_val = st.number_input("Lat", value=0.0, key=f"mw_lat_{i}",
+                                              format="%.6f", step=0.001)
+                with c3:
+                    lon_val = st.number_input("Lon", value=0.0, key=f"mw_lon_{i}",
+                                              format="%.6f", step=0.001)
+                if lat_val != 0.0 or lon_val != 0.0:
+                    multi_wells[i]["lat"] = lat_val
+                    multi_wells[i]["lon"] = lon_val
+
+    # --- Tab: Formation Detection ---
+    with mw_tab_formations:
+        st.subheader("Automatic Formation Boundary Detection")
+        st.markdown(
+            "Detects formation boundaries from **GR log inflections** — "
+            "significant transitions between sandy and shaly intervals."
+        )
+
+        fm_col1, fm_col2 = st.columns(2)
+        with fm_col1:
+            fm_window = st.slider("Smoothing window (samples)", 5, 50, 15,
+                                  help="Larger = fewer, more significant boundaries")
+        with fm_col2:
+            fm_delta = st.slider("Min GR change (API)", 5.0, 50.0, 20.0,
+                                 help="Minimum GR difference across a boundary")
+
+        all_boundaries = {}
+        for w in multi_wells:
+            if "GR" in w["detected"]:
+                fb = detect_formation_boundaries(
+                    w["df"], w["detected"]["GR"],
+                    window=fm_window, min_delta_gr=fm_delta,
+                )
+                if not fb.empty:
+                    all_boundaries[w["name"]] = fb
+
+        if all_boundaries:
+            # Show correlation with boundaries
+            corr_fig_fb = plot_well_correlation(
+                multi_wells, curve="GR", boundaries=all_boundaries
+            )
+            st.pyplot(corr_fig_fb)
+            plt.close(corr_fig_fb)
+
+            # Table of detected boundaries
+            for wname, fb in all_boundaries.items():
+                with st.expander(f"{wname} — {len(fb)} boundaries detected"):
+                    st.dataframe(fb.round(2), width="stretch")
+        else:
+            st.info("No formation boundaries detected. "
+                    "Try lowering the minimum GR change threshold.")
+
+    # --- Tab: Well Summary Table ---
+    with mw_tab_data:
+        st.subheader("Well Summary")
+        summary_rows = []
+        for w in multi_wells:
+            wdf = w["df"]
+            wdet = w["detected"]
+            row = {"Well": w["name"], "File": w["filename"]}
+
+            if "DEPTH" in wdf.columns:
+                row["Top Depth"] = f"{wdf['DEPTH'].min():.1f}"
+                row["Bottom Depth"] = f"{wdf['DEPTH'].max():.1f}"
+                row["Samples"] = len(wdf)
+            row["Curves"] = len(wdf.columns) - 1
+            row["Lat"] = f"{w['lat']:.4f}" if w.get("lat") is not None else ""
+            row["Lon"] = f"{w['lon']:.4f}" if w.get("lon") is not None else ""
+
+            if "GR" in wdet:
+                row["GR mean"] = f"{wdf[wdet['GR']].mean():.1f}"
+            summary_rows.append(row)
+
+        st.dataframe(pd.DataFrame(summary_rows), width="stretch")
+
+    st.stop()  # Don't run single-well analysis in multi-well mode
+
+
+# ===========================================================================
+# SINGLE WELL MODE — Parse the uploaded file(s)
+# ===========================================================================
 parsed_dfs = []
 pdf_images = []
 is_raster_pdf = False
 file_summaries = []
+well_metadata = {}  # Accumulated metadata from LAS headers
 
 for uploaded_file in uploaded_files:
     file_bytes = uploaded_file.read()
@@ -156,16 +357,26 @@ for uploaded_file in uploaded_files:
 
     try:
         if filename.endswith(".las"):
-            parsed = parse_las(file_bytes, filename)
+            parsed, meta = parse_las(file_bytes, filename)
             parsed_dfs.append(parsed)
-            file_summaries.append(f"**{uploaded_file.name}** — {len(parsed)} rows, {len(parsed.columns)} curves (LAS)")
+            # Merge metadata (first file's non-empty values win)
+            for k, v in meta.items():
+                if v and not well_metadata.get(k):
+                    well_metadata[k] = v
+            file_summaries.append(
+                f"**{uploaded_file.name}** — {len(parsed)} rows, "
+                f"{len(parsed.columns)} curves (LAS)"
+            )
         elif filename.endswith((".csv", ".xlsx", ".xls")):
-            parsed = parse_csv_excel(file_bytes, filename)
+            parsed, meta = parse_csv_excel(file_bytes, filename)
             parsed_dfs.append(parsed)
-            file_summaries.append(f"**{uploaded_file.name}** — {len(parsed)} rows, {len(parsed.columns)} curves")
+            file_summaries.append(
+                f"**{uploaded_file.name}** — {len(parsed)} rows, "
+                f"{len(parsed.columns)} curves"
+            )
         elif filename.endswith(".pdf"):
             try:
-                parsed = parse_pdf(file_bytes, filename)
+                parsed, meta = parse_pdf(file_bytes, filename)
             except Exception:
                 parsed = pd.DataFrame()
             if parsed.empty:
@@ -173,13 +384,24 @@ for uploaded_file in uploaded_files:
                 pdf_images.extend(extract_pdf_images(file_bytes))
                 is_raster_pdf = True
                 file_summaries.append(f"**{uploaded_file.name}** — scanned/raster PDF")
+                # Try to extract header metadata from PDF text layer
+                pdf_meta = extract_pdf_header_metadata(file_bytes)
+                for k, v in pdf_meta.items():
+                    if v and not well_metadata.get(k):
+                        well_metadata[k] = v
             else:
                 parsed_dfs.append(parsed)
-                file_summaries.append(f"**{uploaded_file.name}** — {len(parsed)} rows, {len(parsed.columns)} curves (PDF)")
+                file_summaries.append(
+                    f"**{uploaded_file.name}** — {len(parsed)} rows, "
+                    f"{len(parsed.columns)} curves (PDF)"
+                )
         else:
             st.warning(f"Skipping unsupported file: {uploaded_file.name}")
     except Exception as e:
         st.warning(f"Error parsing **{uploaded_file.name}**: {e}")
+
+# Store metadata in session state
+st.session_state["well_metadata"] = well_metadata
 
 # Merge all parsed DataFrames
 if parsed_dfs:
@@ -192,6 +414,10 @@ if parsed_dfs:
 else:
     df = pd.DataFrame()
 
+# Auto-fill well name from LAS header if user left it blank
+if not well_name and well_metadata.get("well_name"):
+    well_name = well_metadata["well_name"]
+
 # Show what was loaded
 if file_summaries:
     with st.sidebar.expander("Loaded files", expanded=True):
@@ -199,6 +425,41 @@ if file_summaries:
             st.markdown(f"- {s}")
         if len(parsed_dfs) > 1:
             st.markdown(f"- **Merged** — {len(df)} rows, {len(df.columns)} curves")
+
+# Show well header info from LAS (lat/long, field, etc.)
+if well_metadata:
+    with st.sidebar.expander("Well Header Info", expanded=True):
+        if well_metadata.get("well_name"):
+            st.markdown(f"**Well:** {well_metadata['well_name']}")
+        if well_metadata.get("field"):
+            st.markdown(f"**Field:** {well_metadata['field']}")
+        if well_metadata.get("company"):
+            st.markdown(f"**Operator:** {well_metadata['company']}")
+        if well_metadata.get("county"):
+            loc_parts = [well_metadata["county"]]
+            if well_metadata.get("state"):
+                loc_parts.append(well_metadata["state"])
+            st.markdown(f"**Location:** {', '.join(loc_parts)}")
+        if well_metadata.get("api_number"):
+            st.markdown(f"**API #:** {well_metadata['api_number']}")
+        if well_metadata.get("uwi"):
+            st.markdown(f"**UWI:** {well_metadata['uwi']}")
+
+        lat = well_metadata.get("latitude")
+        lon = well_metadata.get("longitude")
+        if lat is not None and lon is not None:
+            st.markdown(f"**Latitude:** {lat:.6f}")
+            st.markdown(f"**Longitude:** {lon:.6f}")
+            st.map(pd.DataFrame({"lat": [lat], "lon": [lon]}), zoom=8)
+        elif well_metadata.get("lat_raw") or well_metadata.get("lon_raw"):
+            st.markdown(f"**Lat (raw):** {well_metadata.get('lat_raw', 'N/A')}")
+            st.markdown(f"**Lon (raw):** {well_metadata.get('lon_raw', 'N/A')}")
+            st.caption("Could not parse coordinates to decimal degrees.")
+
+        depth_unit = well_metadata.get("depth_unit", "ft")
+        st.markdown(f"**Depth unit:** {depth_unit}")
+        if well_metadata.get("date"):
+            st.markdown(f"**Log date:** {well_metadata['date']}")
 
 if df.empty and not is_raster_pdf:
     st.error("No data could be extracted from the uploaded file(s).")
@@ -238,9 +499,9 @@ if is_raster_pdf:
             dig_name = digitized_file.name.lower()
             try:
                 if dig_name.endswith(".las"):
-                    df = parse_las(dig_bytes, dig_name)
+                    df, _meta = parse_las(dig_bytes, dig_name)
                 else:
-                    df = parse_csv_excel(dig_bytes, dig_name)
+                    df, _meta = parse_csv_excel(dig_bytes, dig_name)
                 is_raster_pdf = False
                 st.success(f"Loaded digitized data: {len(df)} rows, {len(df.columns)} columns")
             except Exception as e:
@@ -741,14 +1002,42 @@ with tab_verbal:
 with tab_plot:
     st.subheader("Well Log Display")
 
+    # Depth range selector for zooming
+    if "DEPTH" in result.columns and len(result) > 0:
+        plot_depth_min = float(result["DEPTH"].min())
+        plot_depth_max = float(result["DEPTH"].max())
+        plot_range = st.slider(
+            "Depth range to display",
+            min_value=plot_depth_min,
+            max_value=plot_depth_max,
+            value=(plot_depth_min, plot_depth_max),
+            step=0.5, format="%.1f",
+            key="plot_depth_zoom",
+        )
+        plot_df = result[
+            (result["DEPTH"] >= plot_range[0]) & (result["DEPTH"] <= plot_range[1])
+        ]
+    else:
+        plot_df = result
+
     fig = plot_triple_combo(
-        result, detected,
+        plot_df, detected,
         vshale_col="VSHALE",
         porosity_col="PHIE",
         sw_col="SW",
         net_pay_col="NET_PAY",
     )
     st.pyplot(fig)
+
+    # Formation boundary detection
+    if "GR" in detected:
+        with st.expander("Formation Boundary Detection", expanded=False):
+            fb = detect_formation_boundaries(result, detected["GR"])
+            if not fb.empty:
+                st.markdown(f"**{len(fb)} boundaries detected:**")
+                st.dataframe(fb.round(2), width="stretch")
+            else:
+                st.info("No significant formation boundaries detected in this interval.")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Raw Data
