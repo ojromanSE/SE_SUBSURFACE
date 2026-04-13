@@ -12,6 +12,7 @@ import io
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from utils.parsers import (
     parse_las,
@@ -50,7 +51,13 @@ from utils.petrophysics import (
     sw_indonesia,
     compute_net_pay,
 )
-from utils.plotting import plot_triple_combo
+from utils.plotting import (
+    plot_triple_combo,
+    plot_hz_lateral,
+    plot_vt_cross_section,
+    plot_wellbore_trajectory,
+)
+from utils.parsers import infer_well_type
 from utils.ai_interpretation import (
     generate_ai_interpretation,
     is_available as ai_available,
@@ -235,7 +242,6 @@ if app_mode == "Multi-Well Correlation":
         )
         corr_fig = plot_well_correlation(multi_wells, curve=corr_curve)
         st.pyplot(corr_fig)
-        import matplotlib.pyplot as plt
         plt.close(corr_fig)
 
     # --- Tab: Well Map ---
@@ -684,7 +690,6 @@ if is_raster_pdf:
 
                     # Quick plot of digitized curves
                     st.markdown("**Digitized curves:**")
-                    import matplotlib.pyplot as plt
                     n_curves = len(digitized_df.columns) - 1
                     if n_curves > 0:
                         fig, axes = plt.subplots(1, n_curves, figsize=(4 * n_curves, 10), sharey=True)
@@ -736,10 +741,16 @@ if is_raster_pdf:
 # ---------------------------------------------------------------------------
 detected = detect_log_curves(df)
 
+# Infer well type (vertical / deviated / horizontal)
+well_type = infer_well_type(df, detected, well_metadata)
+st.session_state["well_type"] = well_type
+
 _n_files = len(uploaded_files)
+_wt_label = {"vertical": "Vertical", "deviated": "Deviated", "horizontal": "Horizontal"}
 st.success(
     f"Loaded **{_n_files} file{'s' if _n_files > 1 else ''}** — "
-    f"{len(df)} data points, {len(df.columns)} curves detected"
+    f"{len(df)} data points, {len(df.columns)} curves detected — "
+    f"Well type: **{_wt_label.get(well_type, well_type)}**"
 )
 
 # ---------------------------------------------------------------------------
@@ -871,9 +882,10 @@ st.session_state["sw_model"] = sw_model_label
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_verbal, tab_plot, tab_data, tab_volumetrics, tab_advanced = st.tabs([
+tab_verbal, tab_plot, tab_wellviz, tab_data, tab_volumetrics, tab_advanced = st.tabs([
     "Interpretation",
     "Log Plot",
+    "Well Visualization",
     "Raw Data",
     "Quick Volumetrics",
     "Advanced Settings",
@@ -974,7 +986,6 @@ with tab_verbal:
         vshale_col="VSHALE", porosity_col="PHIE",
         sw_col="SW", net_pay_col="NET_PAY",
     )
-    import matplotlib.pyplot as plt
     ai_text = st.session_state.get("ai_interpretation")
     _wn = st.session_state.get("well_name", "")
     pdf_bytes = generate_report_pdf(
@@ -1038,6 +1049,147 @@ with tab_plot:
                 st.dataframe(fb.round(2), width="stretch")
             else:
                 st.info("No significant formation boundaries detected in this interval.")
+
+# ---------------------------------------------------------------------------
+# Tab 2b: Well Visualization (HZ / VT / Trajectory)
+# ---------------------------------------------------------------------------
+with tab_wellviz:
+    _wn = st.session_state.get("well_name", "")
+
+    # Let the user override the detected well type
+    wt_options = ["Vertical", "Deviated", "Horizontal"]
+    wt_default = {"vertical": 0, "deviated": 1, "horizontal": 2}.get(well_type, 0)
+    selected_wt = st.radio(
+        "Well Type",
+        wt_options,
+        index=wt_default,
+        horizontal=True,
+        help=(
+            "Auto-detected from well name, inclination data, or MD/TVD divergence. "
+            "Override if needed."
+        ),
+    )
+    well_type_key = selected_wt.lower()
+
+    if well_type_key == "horizontal":
+        st.subheader("Horizontal Well — Lateral View")
+        st.markdown(
+            "Log curves plotted along the **measured depth axis** (horizontal) to show "
+            "how reservoir quality varies along the lateral section. "
+            "Green bars = net pay, gold = reservoir but below Sw cutoff."
+        )
+        hz_fig = plot_hz_lateral(
+            result, detected, well_name=_wn,
+            vshale_col="VSHALE", porosity_col="PHIE",
+            sw_col="SW", net_pay_col="NET_PAY",
+        )
+        st.pyplot(hz_fig)
+        plt.close(hz_fig)
+
+        # Lateral statistics
+        st.markdown("---")
+        st.markdown("### Lateral Statistics")
+        if "DEPTH" in result.columns and "NET_PAY" in result.columns:
+            md_min = result["DEPTH"].min()
+            md_max = result["DEPTH"].max()
+            lateral_len = md_max - md_min
+            pay_pct = result["NET_PAY"].mean() * 100
+
+            lc1, lc2, lc3, lc4 = st.columns(4)
+            lc1.metric("Lateral Length", f"{lateral_len:.0f}")
+            lc2.metric("Pay %", f"{pay_pct:.1f}%")
+            if "PHIE" in result.columns:
+                pay_mask = result["NET_PAY"] == 1
+                avg_phi_lat = result.loc[pay_mask, "PHIE"].mean() if pay_mask.sum() > 0 else 0
+                lc3.metric("Avg Pay Porosity", f"{avg_phi_lat:.1%}")
+            if "SW" in result.columns:
+                avg_sw_lat = result.loc[pay_mask, "SW"].mean() if pay_mask.sum() > 0 else 1
+                lc4.metric("Avg Pay Sw", f"{avg_sw_lat:.1%}")
+
+    elif well_type_key == "deviated":
+        st.subheader("Deviated Well — Trajectory & Cross-Section")
+        st.markdown(
+            "View the wellbore trajectory (MD vs TVD) and the reservoir cross-section."
+        )
+
+        viz_sub = st.radio("View", ["Trajectory", "Cross-Section"], horizontal=True)
+
+        if viz_sub == "Trajectory":
+            color_opt = st.selectbox(
+                "Color trajectory by",
+                ["None"] + [k for k in ["GR", "RESISTIVITY_DEEP", "DENSITY", "NEUTRON"] if k in detected],
+            )
+            traj_fig = plot_wellbore_trajectory(
+                result, detected, well_name=_wn,
+                color_by=color_opt if color_opt != "None" else "GR",
+            )
+            st.pyplot(traj_fig)
+            plt.close(traj_fig)
+        else:
+            cs_fig = plot_vt_cross_section(
+                result, detected, well_name=_wn,
+                vshale_col="VSHALE", porosity_col="PHIE",
+                sw_col="SW", net_pay_col="NET_PAY",
+            )
+            st.pyplot(cs_fig)
+            plt.close(cs_fig)
+
+    else:  # vertical
+        st.subheader("Vertical Well — Reservoir Cross-Section")
+        st.markdown(
+            "View the reservoir column showing **lithology**, **porosity**, "
+            "**fluid saturation**, and **net pay** as a vertical cross-section."
+        )
+
+        cs_fig = plot_vt_cross_section(
+            result, detected, well_name=_wn,
+            vshale_col="VSHALE", porosity_col="PHIE",
+            sw_col="SW", net_pay_col="NET_PAY",
+        )
+        st.pyplot(cs_fig)
+        plt.close(cs_fig)
+
+        # Zonal summary for vertical wells
+        st.markdown("---")
+        st.markdown("### Zonal Reservoir Summary")
+        if "DEPTH" in result.columns and len(result) > 30:
+            third = len(result) // 3
+            zones = [
+                ("Upper Third", result.iloc[:third]),
+                ("Middle Third", result.iloc[third:2*third]),
+                ("Lower Third", result.iloc[2*third:]),
+            ]
+            zone_data = []
+            for zname, zdf in zones:
+                row = {"Zone": zname}
+                if "DEPTH" in zdf.columns:
+                    row["Top"] = f"{zdf['DEPTH'].iloc[0]:.1f}"
+                    row["Bottom"] = f"{zdf['DEPTH'].iloc[-1]:.1f}"
+                if "VSHALE" in zdf.columns:
+                    row["Avg Vsh"] = f"{zdf['VSHALE'].mean():.2f}"
+                if "PHIE" in zdf.columns:
+                    row["Avg Phi"] = f"{zdf['PHIE'].mean():.3f}"
+                if "SW" in zdf.columns:
+                    row["Avg Sw"] = f"{zdf['SW'].mean():.2f}"
+                if "NET_PAY" in zdf.columns:
+                    row["Pay %"] = f"{zdf['NET_PAY'].mean()*100:.1f}%"
+                zone_data.append(row)
+            st.dataframe(pd.DataFrame(zone_data), width="stretch")
+
+    # Wellbore trajectory available for any well type with TVD
+    if "TVD" in detected and well_type_key != "deviated":
+        with st.expander("Wellbore Trajectory (MD vs TVD)"):
+            color_opt = st.selectbox(
+                "Color by",
+                ["None"] + [k for k in ["GR", "RESISTIVITY_DEEP"] if k in detected],
+                key="traj_color_any",
+            )
+            traj_fig = plot_wellbore_trajectory(
+                result, detected, well_name=_wn,
+                color_by=color_opt if color_opt != "None" else "GR",
+            )
+            st.pyplot(traj_fig)
+            plt.close(traj_fig)
 
 # ---------------------------------------------------------------------------
 # Tab 3: Raw Data
