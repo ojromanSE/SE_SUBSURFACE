@@ -198,7 +198,7 @@ def extract_las_metadata(file_bytes: bytes) -> dict:
         "state": "", "country": "", "latitude": None, "longitude": None,
         "lat_raw": "", "lon_raw": "", "api_number": "", "depth_unit": "ft",
         "curve_units": {}, "date": "", "service_company": "", "uwi": "",
-        "location": "",
+        "location": "", "well_type": "",
     }
 
     # Map of LAS well-section mnemonics to our metadata keys
@@ -210,6 +210,7 @@ def extract_las_metadata(file_bytes: bytes) -> dict:
     }
     _LAT_MNEMONICS = {"LATI", "LAT", "SLAT", "LATITUDE", "YLOC", "SURF_LAT"}
     _LON_MNEMONICS = {"LONG", "LON", "SLON", "LONGITUDE", "XLON", "XLOC", "SURF_LONG"}
+    _WELL_TYPE_MNEMONICS = {"WTYP", "WELL_TYPE", "WELLTYPE", "TYPE"}
 
     for item in las.well:
         mnem = item.mnemonic.strip().upper()
@@ -223,6 +224,8 @@ def extract_las_metadata(file_bytes: bytes) -> dict:
         elif mnem in _LON_MNEMONICS and val:
             meta["lon_raw"] = val
             meta["longitude"] = _parse_dms_to_decimal(val)
+        elif mnem in _WELL_TYPE_MNEMONICS and val:
+            meta["well_type"] = val
 
     meta["depth_unit"] = detect_depth_unit(las)
     meta["curve_units"] = detect_curve_units(las)
@@ -661,7 +664,10 @@ def detect_log_curves(df: pd.DataFrame) -> dict:
     """
     curve_patterns = {
         "GR": r"^(GR|GAMMA|GAMMA_RAY|GAMMA\.RAY|SGR|CGR|GR_CORR|GRD|GRS)$",
-        "DEPTH": r"^(DEPTH|DEPT|MD|TVD|MEASURED_DEPTH|MEASURED\.DEPTH|TDEP)$",
+        "DEPTH": r"^(DEPTH|DEPT|MD|MEASURED_DEPTH|MEASURED\.DEPTH|TDEP)$",
+        "TVD": r"^(TVD|TVDSS|TVD_SS|TRUE_VERT|TVDKB)$",
+        "INCLINATION": r"^(INCL|INC|DEVI|DEVIATION|INCLIN|HDEV|AZIA)$",
+        "AZIMUTH": r"^(AZIM|AZI|AZIMUTH|AZ)$",
         "RESISTIVITY_DEEP": r"^(ILD|RT|LLD|RLLD|RDEP|RD|AT90|RDEEP|RES_DEEP|RESD|R_DEEP|HDRS|M2RX)$",
         "RESISTIVITY_SHALLOW": r"^(ILS|RS|LLS|RLLS|RSHA|RSHAL|AT10|RES_SHALLOW|RESS|R_SHALL|HMRS|M2R1)$",
         "DENSITY": r"^(RHOB|RHOZ|DEN|DENSITY|ZDEN|BULK_DENSITY|BULK\.DEN)$",
@@ -682,3 +688,63 @@ def detect_log_curves(df: pd.DataFrame) -> dict:
                 break
 
     return detected
+
+
+def infer_well_type(
+    df: pd.DataFrame,
+    detected: dict,
+    metadata: dict,
+) -> str:
+    """
+    Infer well type as 'vertical', 'deviated', or 'horizontal'.
+
+    Uses these signals in priority order:
+      1. Explicit well_type from LAS header metadata
+      2. Well name heuristics (#H, HZ, HORIZ in name)
+      3. Inclination data (if INCL column present)
+      4. MD vs TVD divergence (if both columns exist)
+
+    Returns one of: 'vertical', 'deviated', 'horizontal'
+    """
+    # 1. LAS header well type field
+    wt = metadata.get("well_type", "").upper()
+    if wt:
+        if any(k in wt for k in ("HORIZ", "HZ", "LATERAL")):
+            return "horizontal"
+        if any(k in wt for k in ("VERT", "VT", "STRAIGHT")):
+            return "vertical"
+        if any(k in wt for k in ("DEV", "DIRECT", "SLANT")):
+            return "deviated"
+
+    # 2. Well name heuristics
+    name = metadata.get("well_name", "").upper()
+    if re.search(r"\d+\s*H\b|HZ\b|HORIZ|LATERAL", name):
+        return "horizontal"
+
+    # 3. Inclination data
+    if "INCLINATION" in detected and detected["INCLINATION"] in df.columns:
+        incl = df[detected["INCLINATION"]].dropna()
+        if len(incl) > 10:
+            max_incl = incl.max()
+            # Sustained high inclination = horizontal
+            high_pct = (incl > 80).mean()
+            if max_incl > 85 and high_pct > 0.3:
+                return "horizontal"
+            if max_incl > 20:
+                return "deviated"
+
+    # 4. MD vs TVD divergence
+    if "TVD" in detected and detected["TVD"] in df.columns and "DEPTH" in df.columns:
+        md = df["DEPTH"].dropna()
+        tvd = df[detected["TVD"]].dropna()
+        if len(md) > 10 and len(tvd) > 10:
+            md_range = md.max() - md.min()
+            tvd_range = tvd.max() - tvd.min()
+            if md_range > 0:
+                ratio = tvd_range / md_range
+                if ratio < 0.3:
+                    return "horizontal"
+                if ratio < 0.85:
+                    return "deviated"
+
+    return "vertical"
